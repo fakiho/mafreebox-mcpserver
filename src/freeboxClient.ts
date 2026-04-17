@@ -252,9 +252,70 @@ export class FreeboxClient {
     return this.request("POST", "/system/reboot/", {});
   }
 
-  async getLanHosts() {
+  async getLanHosts(opts?: {
+    active_only?: boolean;
+    search?: string;
+    limit?: number;
+    offset?: number;
+    compact?: boolean;
+    count_only?: boolean;
+  }) {
     await this.ensureSession();
-    return this.request("GET", "/lan/browser/pub/");
+    const raw = await this.request("GET", "/lan/browser/pub/");
+    const hosts: any[] = Array.isArray(raw) ? raw : [];
+    const o = opts ?? {};
+    const compact = o.compact !== false;
+    const limit = typeof o.limit === "number" ? o.limit : 50;
+    const offset = typeof o.offset === "number" && o.offset > 0 ? o.offset : 0;
+    const needle = typeof o.search === "string" && o.search.length > 0 ? o.search.toLowerCase() : null;
+
+    const pickIp = (h: any): string | null => {
+      const conns: any[] = Array.isArray(h?.l3connectivities) ? h.l3connectivities : [];
+      const v4 = conns.find((c) => c?.af === "ipv4" && c.active) ?? conns.find((c) => c?.af === "ipv4");
+      return v4 ? v4.addr : null;
+    };
+    const macOf = (h: any): string | null => h?.l2ident?.id ?? null;
+    const nameOf = (h: any): string | null => h?.primary_name ?? h?.default_name ?? null;
+    const vendorOf = (h: any): string | null => h?.vendor_name ?? null;
+
+    const matches = (h: any): boolean => {
+      if (o.active_only && !h.active) return false;
+      if (!needle) return true;
+      const hay = [nameOf(h), macOf(h), pickIp(h), vendorOf(h), h?.host_type]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.indexOf(needle) !== -1;
+    };
+
+    const filtered = hosts.filter(matches);
+
+    if (o.count_only) {
+      return { total: hosts.length, filtered: filtered.length };
+    }
+
+    const paged = limit > 0 ? filtered.slice(offset, offset + limit) : filtered.slice(offset);
+    const result = compact
+      ? paged.map((h) => ({
+          name: nameOf(h),
+          mac: macOf(h),
+          ip: pickIp(h),
+          type: h?.host_type,
+          active: !!h?.active,
+          reachable: !!h?.reachable,
+          vendor: vendorOf(h),
+          last_activity: h?.last_activity,
+        }))
+      : paged;
+
+    return {
+      total: hosts.length,
+      filtered: filtered.length,
+      returned: result.length,
+      offset,
+      limit,
+      hosts: result,
+    };
   }
 
   async getWifiConfig() {

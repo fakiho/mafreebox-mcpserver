@@ -103,8 +103,19 @@ const TOOLS = [
   // RÉSEAU LOCAL
   {
     name: "freebox_get_lan_hosts",
-    description: "Liste tous les appareils détectés sur le réseau local (LAN + Wi-Fi) avec leur nom, adresse IP, adresse MAC, type et statut de connexion.",
-    inputSchema: { type: "object", properties: {}, required: [] },
+    description: "Liste les appareils LAN+Wi-Fi. Retourne par défaut une vue compacte paginée (50 max) pour éviter les réponses volumineuses. Utiliser search/active_only/limit/offset/count_only pour affiner.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        active_only: { type: "boolean", description: "Ne retourner que les appareils actuellement connectés (active=true). Défaut false." },
+        search: { type: "string", description: "Filtre insensible à la casse sur nom, MAC, IP ou vendor." },
+        limit: { type: "number", description: "Nombre max d'appareils retournés. Défaut 50. Mettre 0 pour désactiver." },
+        offset: { type: "number", description: "Décalage de pagination. Défaut 0." },
+        compact: { type: "boolean", description: "Vue compacte (name, mac, ip, type, active, vendor). Défaut true. false = payload brut complet." },
+        count_only: { type: "boolean", description: "Retourner uniquement { total, filtered }." },
+      },
+      required: [],
+    },
   },
   {
     name: "freebox_wake_on_lan",
@@ -387,7 +398,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     // RÉSEAU LOCAL
     case "freebox_get_lan_hosts":
-      return safe(() => client.getLanHosts());
+      return safe(() => client.getLanHosts({
+        active_only: a.active_only as boolean | undefined,
+        search: a.search as string | undefined,
+        limit: a.limit as number | undefined,
+        offset: a.offset as number | undefined,
+        compact: a.compact as boolean | undefined,
+        count_only: a.count_only as boolean | undefined,
+      }));
 
     case "freebox_wake_on_lan":
       return safe(() => client.wakeOnLan(a.mac as string, a.password as string | undefined));

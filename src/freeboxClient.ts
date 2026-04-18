@@ -101,7 +101,8 @@ export class FreeboxClient {
     method: string,
     path: string,
     body?: unknown,
-    authenticated = true
+    authenticated = true,
+    _retried = false
   ): Promise<T> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -121,6 +122,18 @@ export class FreeboxClient {
     debug(`← ${res.status} success=${json.success}${json.error_code ? ` error=${json.error_code}` : ""}`);
 
     if (!json.success) {
+      // Session périmée ou permissions mises à jour côté Freebox : on la jette et on rejoue une fois.
+      if (
+        authenticated &&
+        !_retried &&
+        json.error_code === "auth_required" &&
+        this.appToken
+      ) {
+        debug("auth_required : réouverture de session + retry");
+        this.sessionToken = null;
+        await this.openSession();
+        return this.request<T>(method, path, body, authenticated, true);
+      }
       throw new Error(`Freebox API error [${json.error_code ?? "unknown"}]: ${json.msg ?? "no message"}`);
     }
 
@@ -142,9 +155,38 @@ export class FreeboxClient {
    * Lance la procédure d'autorisation initiale.
    * L'utilisateur doit appuyer sur ">" sur la Freebox.
    * Retourne le track_id pour pouvoir poller le statut.
+   *
+   * Si un app_token est déjà stocké ET fonctionnel, retourne
+   * { alreadyAuthorized: true } sans écraser le token.
    */
-  async startAuthorization(): Promise<{ trackId: number; message: string }> {
+  async startAuthorization(): Promise<{
+    trackId: number;
+    message: string;
+    alreadyAuthorized?: boolean;
+    permissions?: Record<string, boolean>;
+  }> {
     await this.discover();
+
+    // Guard-rail : si le token stocké ouvre déjà une session, ne pas en redemander un.
+    if (this.appToken) {
+      try {
+        this.sessionToken = null;
+        const info = await this.openSession();
+        return {
+          trackId: 0,
+          message:
+            "Déjà authentifié — le token stocké est valide. Aucune nouvelle autorisation requise.",
+          alreadyAuthorized: true,
+          permissions: info.permissions,
+        };
+      } catch (e) {
+        debug(
+          `token stocké invalide (${e instanceof Error ? e.message : String(e)}), lancement d'une nouvelle autorisation`
+        );
+        this.sessionToken = null;
+        this.appToken = null;
+      }
+    }
 
     const result = await this.request<{ app_token: string; track_id: number }>(
       "POST",

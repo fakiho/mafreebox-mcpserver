@@ -68,7 +68,7 @@ const TOOLS = [
   {
     name: "freebox_authorize",
     description:
-      "Démarre la procédure d'autorisation de l'application sur la Freebox. L'utilisateur doit appuyer sur '>' sur l'écran LCD de sa Freebox pour valider. À appeler une seule fois lors de la première utilisation.",
+      "Démarre la procédure d'autorisation. Si un token valide est déjà stocké, retourne { alreadyAuthorized: true } SANS écraser le token ni redemander d'appui LCD. Sinon, demande l'autorisation (appui sur '>' sur l'écran LCD Freebox).",
     inputSchema: { type: "object", properties: {}, required: [] },
   },
   {

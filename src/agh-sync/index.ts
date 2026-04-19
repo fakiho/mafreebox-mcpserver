@@ -145,6 +145,7 @@ async function main() {
     (m) => logger.info(m),
   );
   health.attachIsolation(isolation, isolationApiKey);
+  health.attachAgh(agh);
   health.start(healthPort, healthBind);
   if (!isolationApiKey) {
     logger.warn("ISOLATION_API_KEY not set — /isolate and /unisolate endpoints will reject all writes");

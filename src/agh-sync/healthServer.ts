@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
+import type { AdGuardHomeClient } from "./aghClient.js";
 import { IsolationError, type IsolationManager } from "./isolationManager.js";
 import type { MetricsSnapshot } from "./types.js";
 
@@ -41,6 +42,7 @@ export class HealthServer {
   private server: Server | null = null;
   private isolation: IsolationManager | null = null;
   private isolationApiKey: string | null = null;
+  private aghClient: AdGuardHomeClient | null = null;
   private state: HealthState = {
     startedAt: Date.now(),
     freeboxReachable: false,
@@ -59,6 +61,10 @@ export class HealthServer {
   attachIsolation(manager: IsolationManager, apiKey: string | null): void {
     this.isolation = manager;
     this.isolationApiKey = apiKey;
+  }
+
+  attachAgh(client: AdGuardHomeClient): void {
+    this.aghClient = client;
   }
 
   start(port: number, host = "0.0.0.0"): void {
@@ -194,7 +200,31 @@ export class HealthServer {
       this.handleAllowlistMutate(req, res, "remove").catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
       return;
     }
+    if (req.method === "GET" && req.url === "/agh-stats") {
+      this.handleAghStats(res).catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
+      return;
+    }
     res.writeHead(404, { "Content-Type": "text/plain" }).end("not found\n");
+  }
+
+  /**
+   * Proxies AGH's /control/stats through the sync. Useful for downstream
+   * consumers (Node-RED digest flow, HA sensors) that want aggregated
+   * query/block totals without needing AGH credentials themselves.
+   *
+   * The window ("time_units") is whatever AGH is globally configured for
+   * (24h / 7d / 30d / 90d — see AGH's Settings → General Settings).
+   * A weekly digest should set AGH's stats interval to 7 days.
+   */
+  private async handleAghStats(res: ServerResponse): Promise<void> {
+    if (!this.aghClient) return this.replyError(res, 503, "agh client not attached");
+    try {
+      const stats = await this.aghClient.getStats();
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(stats, null, 2));
+    } catch (e) {
+      this.replyError(res, 502, `AGH stats fetch failed: ${String(e)}`);
+    }
   }
 
   // ─── Isolation endpoints ──────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import type { AdGuardHomeClient } from "./aghClient.js";
 import type { AnomalyStateStore } from "./anomalyState.js";
+import type { IsolationManager } from "./isolationManager.js";
 import type { StateStore } from "./state.js";
 import {
   THREAT_INTEL_BLOCKLIST_URLS,
@@ -62,6 +63,7 @@ export class AnomalyDetector {
     private state: StateStore,
     private anomalyState: AnomalyStateStore,
     private log: (msg: string) => void,
+    private isolation: IsolationManager | null = null,
   ) {}
 
   /** Fetches AGH filter-list config, caches which filterIds map to our
@@ -312,7 +314,7 @@ export class AnomalyDetector {
       if (m === mac) ips.push(ip);
     }
 
-    return {
+    const candidate: DeviceAnomaly = {
       mac,
       name,
       host_type: hostType,
@@ -327,6 +329,14 @@ export class AnomalyDetector {
       blocked_hits_24h: blocked24,
       threat_intel_hits_24h: tib24,
       last_seen_ts: nowSec,
+      proposed_action: null,
+      proposed_reason: null,
     };
+    if (this.isolation) {
+      const d = this.isolation.shouldPropose(candidate);
+      candidate.proposed_action = d.propose ? "isolate" : (score >= SCORE_THRESHOLD ? "watch" : null);
+      candidate.proposed_reason = d.reason;
+    }
+    return candidate;
   }
 }

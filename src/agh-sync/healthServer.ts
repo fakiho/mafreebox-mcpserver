@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
+import { IsolationError, type IsolationManager } from "./isolationManager.js";
 import type { MetricsSnapshot } from "./types.js";
 
 interface HealthState {
@@ -38,6 +39,8 @@ interface HealthState {
  */
 export class HealthServer {
   private server: Server | null = null;
+  private isolation: IsolationManager | null = null;
+  private isolationApiKey: string | null = null;
   private state: HealthState = {
     startedAt: Date.now(),
     freeboxReachable: false,
@@ -52,6 +55,11 @@ export class HealthServer {
   };
 
   constructor(private log: (msg: string) => void) {}
+
+  attachIsolation(manager: IsolationManager, apiKey: string | null): void {
+    this.isolation = manager;
+    this.isolationApiKey = apiKey;
+  }
 
   start(port: number, host = "0.0.0.0"): void {
     if (this.server) return;
@@ -162,6 +170,140 @@ export class HealthServer {
       res.end(body);
       return;
     }
+    if (req.method === "GET" && req.url === "/isolations") {
+      this.handleListIsolations(res);
+      return;
+    }
+    if (req.method === "POST" && req.url === "/isolate") {
+      this.handleIsolate(req, res).catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/unisolate") {
+      this.handleUnisolate(req, res).catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
+      return;
+    }
     res.writeHead(404, { "Content-Type": "text/plain" }).end("not found\n");
+  }
+
+  // ─── Isolation endpoints ──────────────────────────────────────────────
+
+  private handleListIsolations(res: ServerResponse): void {
+    if (!this.isolation) {
+      this.replyError(res, 503, "isolation manager not attached");
+      return;
+    }
+    const body = JSON.stringify({
+      active: this.isolation.getActive(),
+      config: this.isolation.getConfig(),
+    }, null, 2);
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(body);
+  }
+
+  private async handleIsolate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.isolation) return this.replyError(res, 503, "isolation manager not attached");
+    if (!this.authorized(req)) return this.replyError(res, 403, "invalid or missing X-Isolation-Key header");
+    let body: Record<string, unknown>;
+    try {
+      body = await this.readJsonBody(req);
+    } catch (e) {
+      return this.replyError(res, 400, `bad JSON body: ${String(e)}`);
+    }
+    const mac = typeof body.mac === "string" ? body.mac : "";
+    if (!mac) return this.replyError(res, 400, "missing `mac` field");
+    const durationHours = typeof body.durationHours === "number" && body.durationHours > 0
+      ? body.durationHours
+      : null;
+    const reason = typeof body.reason === "string" ? body.reason : "manual API request";
+    const source = (body.source === "node-red-action" || body.source === "auto" || body.source === "manual-api")
+      ? body.source
+      : "manual-api" as const;
+    const userConfirmed = body.userConfirmed === true;
+    try {
+      const record = await this.isolation.apply(mac, {
+        durationSec: durationHours ? Math.floor(durationHours * 3600) : undefined,
+        reason,
+        source,
+        userConfirmed,
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, isolation: record }, null, 2));
+    } catch (e) {
+      if (e instanceof IsolationError) {
+        const status = e.code === "allowlisted" ? 409
+          : e.code === "bad_mac" ? 400
+          : e.code === "confirmation_required" ? 409
+          : 500;
+        return this.replyError(res, status, e.message, e.code);
+      }
+      return this.replyError(res, 500, `internal: ${String(e)}`);
+    }
+  }
+
+  private async handleUnisolate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.isolation) return this.replyError(res, 503, "isolation manager not attached");
+    if (!this.authorized(req)) return this.replyError(res, 403, "invalid or missing X-Isolation-Key header");
+    let body: Record<string, unknown>;
+    try {
+      body = await this.readJsonBody(req);
+    } catch (e) {
+      return this.replyError(res, 400, `bad JSON body: ${String(e)}`);
+    }
+    const mac = typeof body.mac === "string" ? body.mac : "";
+    if (!mac) return this.replyError(res, 400, "missing `mac` field");
+    try {
+      const existed = await this.isolation.revoke(mac);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, existed }, null, 2));
+    } catch (e) {
+      if (e instanceof IsolationError) {
+        const status = e.code === "bad_mac" ? 400 : 500;
+        return this.replyError(res, status, e.message, e.code);
+      }
+      return this.replyError(res, 500, `internal: ${String(e)}`);
+    }
+  }
+
+  private authorized(req: IncomingMessage): boolean {
+    if (!this.isolationApiKey) return false; // require explicit key
+    const header = req.headers["x-isolation-key"];
+    const value = Array.isArray(header) ? header[0] : header;
+    return typeof value === "string" && value === this.isolationApiKey;
+  }
+
+  private replyError(res: ServerResponse, status: number, message: string, code?: string): void {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: message, code: code ?? null }));
+  }
+
+  private readJsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      const MAX_BODY = 64 * 1024;
+      req.on("data", (chunk: Buffer) => {
+        total += chunk.length;
+        if (total > MAX_BODY) {
+          req.destroy();
+          reject(new Error("body too large"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8").trim();
+        if (!raw) return resolve({});
+        try {
+          const parsed = JSON.parse(raw);
+          if (typeof parsed !== "object" || parsed === null) {
+            return reject(new Error("body must be a JSON object"));
+          }
+          resolve(parsed as Record<string, unknown>);
+        } catch (e) {
+          reject(e as Error);
+        }
+      });
+      req.on("error", reject);
+    });
   }
 }

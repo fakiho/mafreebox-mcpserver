@@ -178,6 +178,41 @@ export interface DeviceAnomaly {
   blocked_hits_24h: number;   // total blocks (user + list + threat)
   threat_intel_hits_24h: number; // subset — only threat-intel list matches
   last_seen_ts: number;
+  /** IsolationManager decision: "isolate" = safe to propose a block,
+   *  "watch" = keep observing, null = allowlisted or already isolated. */
+  proposed_action: "isolate" | "watch" | null;
+  proposed_reason: string | null;
+}
+
+export interface IsolationRecord {
+  mac: string;
+  filterId: number;
+  blockedAt: number;      // epoch seconds
+  expiresAt: number;      // epoch seconds (Freebox tmp_mode_expire)
+  reason: string;
+  confirmedByUser: boolean;
+  source: "node-red-action" | "auto" | "manual-api";
+}
+
+export interface IsolationStateFile {
+  isolations: IsolationRecord[];
+  /** MAC → epoch seconds when user last confirmed an isolation for it.
+   *  Used to auto-skip confirmation on repeat offenders within 24h. */
+  confirmedMacs: Record<string, number>;
+}
+
+export interface FreeboxParentalFilter {
+  id: number;
+  name?: string;
+  macs?: string[];
+  ips?: string[];
+  forced_mode?: "allowed" | "denied" | "webonly";
+  forced?: boolean;
+  tmp_mode?: "allowed" | "denied" | "webonly" | "" | null;
+  tmp_mode_expire?: number; // seconds remaining (0 = not set)
+  current_permission?: string;
+  filter_mode?: string;
+  default_filter_mode?: string;
 }
 
 export interface MetricsSnapshot {

@@ -17,6 +17,7 @@ import { AnomalyDetector } from "./anomalyDetector.js";
 import { AnomalyStateStore } from "./anomalyState.js";
 import { BypassDetector } from "./bypassDetector.js";
 import { HealthServer } from "./healthServer.js";
+import { IsolationManager } from "./isolationManager.js";
 import { LiveWatcher } from "./liveWatcher.js";
 import { NeighborCache } from "./neighborDiscovery.js";
 import { Reconciler } from "./reconciler.js";
@@ -81,6 +82,12 @@ async function main() {
   const anomalyStatePath = process.env.ANOMALY_STATE_FILE ?? "/app/data/anomaly_state.json";
   const healthPort = envNum("HEALTH_PORT", 8090);
   const healthBind = process.env.HEALTH_BIND ?? "0.0.0.0";
+  const bypassAllowlist = parseMacList(process.env.BYPASS_ALLOWLIST);
+  const autoIsolateEnabled = (process.env.AUTO_ISOLATE_ENABLED ?? "false").toLowerCase() === "true";
+  const autoIsolateScoreThreshold = envNum("AUTO_ISOLATE_SCORE_THRESHOLD", 60);
+  const isolationDurationHours = envNum("ISOLATION_DURATION_HOURS", 2);
+  const isolationStatePath = process.env.ISOLATION_STATE_FILE ?? "/app/data/isolation_state.json";
+  const isolationApiKey = process.env.ISOLATION_API_KEY ?? null;
   const logLevel = ((process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel);
   const level: LogLevel = LOG_LEVELS.includes(logLevel) ? logLevel : "info";
   const logger = makeLogger(level);
@@ -125,7 +132,26 @@ async function main() {
   const health = new HealthServer((m) => logger.info(m));
   health.markFreebox(true);
   health.markAgh(true);
+
+  const isolation = new IsolationManager(
+    freebox,
+    {
+      allowlist: bypassAllowlist,
+      autoEnabled: autoIsolateEnabled,
+      autoScoreThreshold: autoIsolateScoreThreshold,
+      defaultDurationSec: isolationDurationHours * 3600,
+      statePath: isolationStatePath,
+    },
+    (m) => logger.info(m),
+  );
+  health.attachIsolation(isolation, isolationApiKey);
   health.start(healthPort, healthBind);
+  if (!isolationApiKey) {
+    logger.warn("ISOLATION_API_KEY not set — /isolate and /unisolate endpoints will reject all writes");
+  }
+  logger.info(
+    `[isolation] config allowlist=${bypassAllowlist.size} auto=${autoIsolateEnabled} threshold=${autoIsolateScoreThreshold} duration=${isolationDurationHours}h`,
+  );
 
   const errorLogger = (m: string) => {
     logger.error(m);
@@ -142,7 +168,7 @@ async function main() {
   const liveWatcher = new LiveWatcher(agh, reconciler, pollLiveMs, (m) => logger.info(m));
   const bypassDetector = new BypassDetector(agh, state, (m) => logger.info(m));
   const anomalyState = new AnomalyStateStore(anomalyStatePath);
-  const anomalyDetector = new AnomalyDetector(agh, state, anomalyState, (m) => logger.info(m));
+  const anomalyDetector = new AnomalyDetector(agh, state, anomalyState, (m) => logger.info(m), isolation);
 
   let lastAnomalyLogAt = 0;
   const runAnomalyDetection = async () => {
@@ -217,6 +243,7 @@ async function main() {
     await runReconcile("");
     await runBypassDetection();
     await runAnomalyDetection();
+    isolation.cleanupExpired();
   }, pollReconcileMs);
 
   const shutdown = (sig: string) => {
@@ -226,6 +253,7 @@ async function main() {
     health.stop();
     state.save();
     anomalyState.save();
+    isolation.save();
     process.exit(0);
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

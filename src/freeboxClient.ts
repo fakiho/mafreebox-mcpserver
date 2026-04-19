@@ -461,6 +461,90 @@ export class FreeboxClient {
     return this.request("GET", "/parental/filter/");
   }
 
+  async listParentalFilters(): Promise<Array<{
+    id: number;
+    name?: string;
+    macs?: string[];
+    ips?: string[];
+    forced_mode?: string;
+    forced?: boolean;
+    tmp_mode?: string | null;
+    tmp_mode_expire?: number;
+    current_permission?: string;
+    filter_mode?: string;
+    default_filter_mode?: string;
+  }>> {
+    await this.ensureSession();
+    const raw = await this.request("GET", "/parental/filter/");
+    return Array.isArray(raw) ? (raw as Array<Record<string, unknown>>).map((f) => f as never) : [];
+  }
+
+  /**
+   * Temporarily denies internet access for a MAC via Freebox parental control.
+   * If a filter already contains this MAC, updates it; otherwise creates a
+   * new one and applies tmp_mode=denied with the requested expiry.
+   *
+   * Freebox auto-unblocks when `tmp_mode_expire` seconds elapse — we never
+   * need to schedule manual un-blocks for the happy path.
+   */
+  async blockMac(
+    mac: string,
+    opts: { durationSec?: number; name?: string } = {}
+  ): Promise<{ filterId: number; expiresAt: number }> {
+    await this.ensureSession();
+    const normalized = mac.trim().toLowerCase().replace(/-/g, ":");
+    const durationSec = Math.max(60, Math.floor(opts.durationSec ?? 7200));
+    const filters = await this.listParentalFilters();
+    let existing = filters.find((f) => (f.macs ?? []).map((m) => m.toLowerCase()).includes(normalized));
+    let filterId: number;
+    if (!existing) {
+      const suffix = normalized.replace(/:/g, "").slice(-6).toUpperCase();
+      const name = opts.name ?? `agh-sync-isolated-${suffix}`;
+      const created = await this.request<{ id: number }>("POST", "/parental/filter/", {
+        macs: [normalized],
+        name,
+        forced_mode: "allowed",
+        forced: false,
+      });
+      filterId = created.id;
+    } else {
+      filterId = existing.id;
+    }
+    await this.request("PUT", `/parental/filter/${filterId}`, {
+      tmp_mode: "denied",
+      tmp_mode_expire: durationSec,
+    });
+    return {
+      filterId,
+      expiresAt: Math.floor(Date.now() / 1000) + durationSec,
+    };
+  }
+
+  /**
+   * Lifts a temporary block by clearing tmp_mode. Accepts either the MAC
+   * (we'll look up the filter) or the numeric filter id directly.
+   *
+   * We don't DELETE the filter — the user might want it to persist as a
+   * dormant allowed rule for later re-use.
+   */
+  async unblockMac(macOrId: string | number): Promise<void> {
+    await this.ensureSession();
+    let filterId: number | null = null;
+    if (typeof macOrId === "number") {
+      filterId = macOrId;
+    } else {
+      const normalized = macOrId.trim().toLowerCase().replace(/-/g, ":");
+      const filters = await this.listParentalFilters();
+      const found = filters.find((f) => (f.macs ?? []).map((m) => m.toLowerCase()).includes(normalized));
+      if (!found) return;
+      filterId = found.id;
+    }
+    await this.request("PUT", `/parental/filter/${filterId}`, {
+      tmp_mode: "",
+      tmp_mode_expire: 0,
+    });
+  }
+
   async getVMs() {
     await this.ensureSession();
     return this.request("GET", "/vm/");

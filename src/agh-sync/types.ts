@@ -132,7 +132,18 @@ export interface QueryRecord {
   domain: string;      // normalized lowercase, TLD preserved
   nxdomain: boolean;
   blocked: boolean;    // any filter rule matched (filtered/blocked_safebrowsing/…)
+  /** Blocked specifically by a threat-intel blocklist (URLhaus, Hagezi TIF/Pro).
+   *  Excludes user rules (filterId=0), ad/tracker lists, and DoH lists. */
+  threatIntelBlocked: boolean;
 }
+
+/** URLs we consider "threat intelligence" — blocks here count toward
+ *  compromise scoring. Ad/tracker blocks and user rules do not. */
+export const THREAT_INTEL_BLOCKLIST_URLS: ReadonlySet<string> = new Set([
+  "https://urlhaus.abuse.ch/downloads/hostfile/",
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt",
+  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt",
+]);
 
 /** Per-MAC anomaly state persisted across restarts. */
 export interface AnomalyStateEntry {
@@ -154,7 +165,8 @@ export interface DeviceAnomaly {
   queries_24h_avg_per_hour: number;
   nxdomain_rate: number;      // 0-1, last hour
   new_domains_1h: number;
-  blocked_hits_24h: number;
+  blocked_hits_24h: number;   // total blocks (user + list + threat)
+  threat_intel_hits_24h: number; // subset — only threat-intel list matches
   last_seen_ts: number;
 }
 

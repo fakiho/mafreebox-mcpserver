@@ -1,14 +1,16 @@
 import type { AdGuardHomeClient } from "./aghClient.js";
 import type { AnomalyStateStore } from "./anomalyState.js";
 import type { StateStore } from "./state.js";
-import type {
-  AghQueryLogItem,
-  DeviceAnomaly,
-  MetricsSnapshot,
-  QueryRecord,
+import {
+  THREAT_INTEL_BLOCKLIST_URLS,
+  type AghQueryLogItem,
+  type DeviceAnomaly,
+  type MetricsSnapshot,
+  type QueryRecord,
 } from "./types.js";
 
 const SCORE_THRESHOLD = 40;
+const BOOTSTRAP_GRACE_SEC = 3600;  // skip first_seen_flood during first hour of uptime
 
 /**
  * Per-device DNS anomaly detector. Four heuristics:
@@ -29,6 +31,8 @@ export class AnomalyDetector {
   private lastSeenQueryTs = 0;
   private ipToMac = new Map<string, string>();
   private lastAttributionStats = { seen: 0, attributed: 0 };
+  private processStartedAtSec = Math.floor(Date.now() / 1000);
+  private threatIntelFilterIds = new Set<number>();
 
   constructor(
     private agh: AdGuardHomeClient,
@@ -36,6 +40,23 @@ export class AnomalyDetector {
     private anomalyState: AnomalyStateStore,
     private log: (msg: string) => void,
   ) {}
+
+  /** Fetches AGH filter-list config, caches which filterIds map to our
+   *  threat-intel URLs. Only matches against those fire `threat_hit`. */
+  private async refreshThreatIntelFilterIds(): Promise<void> {
+    try {
+      const status = await this.agh.getFilteringStatus();
+      const ids = new Set<number>();
+      for (const f of status.filters ?? []) {
+        if (f.enabled && THREAT_INTEL_BLOCKLIST_URLS.has(f.url)) {
+          ids.add(f.id);
+        }
+      }
+      this.threatIntelFilterIds = ids;
+    } catch (e) {
+      this.log(`[anomaly] could not refresh threat-intel filter IDs: ${String(e)}`);
+    }
+  }
 
   private isMac(s: string): boolean {
     return /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(s);
@@ -73,6 +94,7 @@ export class AnomalyDetector {
 
   async run(): Promise<MetricsSnapshot> {
     const nowSec = Math.floor(Date.now() / 1000);
+    await this.refreshThreatIntelFilterIds();
     await this.pollRecentQueries(nowSec);
     this.anomalyState.prune(nowSec);
 
@@ -167,6 +189,10 @@ export class AnomalyDetector {
       reason.startsWith("filtered") ||
       reason.startsWith("blocked") ||
       reason === "rewrite";
+    const filterId = typeof item.filterId === "number"
+      ? item.filterId
+      : (typeof item.filterListId === "number" ? item.filterListId : -1);
+    const threatIntelBlocked = blocked && filterId > 0 && this.threatIntelFilterIds.has(filterId);
     const nxdomain = status === "nxdomain" || status === "nodata";
     return {
       ts: Math.floor(tsMs / 1000),
@@ -174,6 +200,7 @@ export class AnomalyDetector {
       domain,
       nxdomain,
       blocked,
+      threatIntelBlocked,
     };
   }
 
@@ -195,6 +222,10 @@ export class AnomalyDetector {
     if (rec.blocked) {
       entry.hourlyCounts[blockedKey] = (entry.hourlyCounts[blockedKey] ?? 0) + 1;
     }
+    if (rec.threatIntelBlocked) {
+      const tiKey = `_tib_${bucket}`;
+      entry.hourlyCounts[tiKey] = (entry.hourlyCounts[tiKey] ?? 0) + 1;
+    }
     return true;
   }
 
@@ -210,13 +241,16 @@ export class AnomalyDetector {
     let sum24 = 0;
     let n24 = 0;
     let blocked24 = 0;
+    let tib24 = 0;
     for (let h = 1; h <= 24; h++) {
       const b = this.anomalyState.hourBucket(nowSec - h * 3600);
       const cnt = entry.hourlyCounts[b] ?? 0;
       if (cnt > 0) { sum24 += cnt; n24++; }
       blocked24 += entry.hourlyCounts[`_blk_${b}`] ?? 0;
+      tib24 += entry.hourlyCounts[`_tib_${b}`] ?? 0;
     }
     blocked24 += entry.hourlyCounts[`_blk_${curBucket}`] ?? 0;
+    tib24 += entry.hourlyCounts[`_tib_${curBucket}`] ?? 0;
     const avg24 = n24 > 0 ? sum24 / n24 : 0;
 
     // new_domains_1h: domains whose firstSeen is within last hour
@@ -227,19 +261,32 @@ export class AnomalyDetector {
     }
 
     const nxdomainRate = q1h > 0 ? nx1h / q1h : 0;
+    const uptimeSec = nowSec - this.processStartedAtSec;
+    const pastBootstrap = uptimeSec > BOOTSTRAP_GRACE_SEC;
 
     const signals: string[] = [];
     let score = 0;
     if (q1h > 50 && avg24 > 0 && q1h > 3 * avg24) { signals.push("rate_spike"); score += 40; }
     if (q1h >= 30 && nxdomainRate > 0.3) { signals.push("nxdomain_high"); score += 30; }
-    if (newDomains > 20) { signals.push("first_seen_flood"); score += 20; }
-    if (blocked24 > 0) { signals.push("threat_hit"); score += Math.min(20, blocked24 * 5); }
+    // first_seen_flood is suppressed during the bootstrap window: on fresh
+    // state every domain looks "new" because there's no prior history.
+    if (pastBootstrap && newDomains > 20) { signals.push("first_seen_flood"); score += 20; }
+    // threat_hit only fires on actual threat-intel list matches — not user
+    // rules (filterId=0) and not ad/tracker lists. Score scales with volume
+    // but caps at +20 so a single malware query still grabs attention.
+    if (tib24 > 0) { signals.push("threat_hit"); score += Math.min(20, tib24 * 5); }
     if (score > 100) score = 100;
+
+    // Populate current IPs from the reverse map (MAC → many possible IPs)
+    const ips: string[] = [];
+    for (const [ip, m] of this.ipToMac) {
+      if (m === mac) ips.push(ip);
+    }
 
     return {
       mac,
       name,
-      ips: [],
+      ips,
       score,
       signals,
       queries_1h: q1h,
@@ -247,6 +294,7 @@ export class AnomalyDetector {
       nxdomain_rate: Math.round(nxdomainRate * 100) / 100,
       new_domains_1h: newDomains,
       blocked_hits_24h: blocked24,
+      threat_intel_hits_24h: tib24,
       last_seen_ts: nowSec,
     };
   }

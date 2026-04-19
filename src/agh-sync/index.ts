@@ -13,6 +13,7 @@
 
 import { FreeboxClient } from "../freeboxClient.js";
 import { AdGuardHomeClient } from "./aghClient.js";
+import { HealthServer } from "./healthServer.js";
 import { LiveWatcher } from "./liveWatcher.js";
 import { NeighborCache } from "./neighborDiscovery.js";
 import { Reconciler } from "./reconciler.js";
@@ -73,6 +74,8 @@ async function main() {
   const retentionDays = envNum("RETENTION_DAYS", 30);
   const excludeMacs = parseMacList(process.env.EXCLUDE_MACS);
   const statePath = process.env.SYNC_STATE_FILE ?? "/app/data/sync_state.json";
+  const healthPort = envNum("HEALTH_PORT", 8090);
+  const healthBind = process.env.HEALTH_BIND ?? "0.0.0.0";
   const logLevel = ((process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel);
   const level: LogLevel = LOG_LEVELS.includes(logLevel) ? logLevel : "info";
   const logger = makeLogger(level);
@@ -114,6 +117,15 @@ async function main() {
 
   const state = new StateStore(statePath);
   const neighbors = new NeighborCache((m) => logger.info(m));
+  const health = new HealthServer((m) => logger.info(m));
+  health.markFreebox(true);
+  health.markAgh(true);
+  health.start(healthPort, healthBind);
+
+  const errorLogger = (m: string) => {
+    logger.error(m);
+    health.recordError(m);
+  };
   const reconciler = new Reconciler(
     freebox,
     agh,
@@ -124,31 +136,36 @@ async function main() {
   );
   const liveWatcher = new LiveWatcher(agh, reconciler, pollLiveMs, (m) => logger.info(m));
 
-  try {
-    const res = await reconciler.reconcile();
-    logger.info(
-      `[reconcile] startup: added=${res.added} adopted=${res.adopted} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged}`,
-    );
-  } catch (e) {
-    logger.error(`startup reconcile failed: ${String(e)}`);
-  }
-
-  liveWatcher.start();
-  const reconcileTimer = setInterval(async () => {
+  const runReconcile = async (label: string) => {
     try {
       const res = await reconciler.reconcile();
       logger.info(
-        `[reconcile] added=${res.added} adopted=${res.adopted} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged}`,
+        `[reconcile] ${label}added=${res.added} adopted=${res.adopted} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged}`,
       );
+      health.recordReconcile(res, state.macs().length);
+      health.markFreebox(true);
+      health.markAgh(true);
     } catch (e) {
-      logger.error(`reconcile failed: ${String(e)}`);
+      const msg = String(e);
+      errorLogger(`reconcile failed: ${msg}`);
+      if (msg.includes("ECONNREFUSED") || msg.includes("HTTP 401") || msg.includes("HTTP 403")) {
+        health.markAgh(false);
+      }
+      if (msg.toLowerCase().includes("freebox")) {
+        health.markFreebox(false);
+      }
     }
-  }, pollReconcileMs);
+  };
+
+  await runReconcile("startup: ");
+  liveWatcher.start();
+  const reconcileTimer = setInterval(() => runReconcile(""), pollReconcileMs);
 
   const shutdown = (sig: string) => {
     logger.info(`received ${sig}, shutting down`);
     liveWatcher.stop();
     clearInterval(reconcileTimer);
+    health.stop();
     state.save();
     process.exit(0);
   };

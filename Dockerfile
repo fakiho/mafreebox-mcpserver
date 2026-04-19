@@ -62,6 +62,11 @@ ENV SYNC_STATE_FILE=/app/data/sync_state.json
 
 USER node
 
+# Docker healthcheck pings the sidecar's own /healthz endpoint (default :8090).
+# wget is provided by busybox in node:alpine — no extra install needed.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8090/healthz >/dev/null || exit 1
+
 # CMD (not ENTRYPOINT) so `docker compose run agh-sync node dist/agh-sync/authorize.js`
 # substitutes cleanly instead of appending to a fixed entrypoint.
 CMD ["node", "dist/agh-sync/index.js"]

@@ -70,3 +70,34 @@ export interface SyncStateEntry {
 }
 
 export type SyncState = Record<string, SyncStateEntry>;
+
+export interface AghFilterList {
+  id: number;
+  name: string;
+  url: string;
+  enabled: boolean;
+  rules_count: number;
+  last_updated?: string;
+}
+
+export interface AghFilteringStatus {
+  enabled: boolean;
+  interval: number;
+  filters: AghFilterList[] | null;
+  whitelist_filters: AghFilterList[] | null;
+  user_rules: string[];
+}
+
+export interface AghStats {
+  time_units?: string;
+  num_dns_queries?: number;
+  num_blocked_filtering?: number;
+  top_clients?: Array<Record<string, number>>;
+}
+
+export interface SuspectedBypasser {
+  mac: string;
+  aghName: string | null;
+  lastActiveFreebox: number;
+  ips: string[];
+}

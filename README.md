@@ -345,6 +345,20 @@ docker compose logs -f agh-sync
 | `SYNC_STATE_FILE` | `/app/data/sync_state.json` | Cache MAC → nom AGH pour détection des renommages |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
+### Anti-bypass blocklists (optionnel, recommandé)
+
+Ajoute les listes Hagezi de blocage DoH/VPN/Proxy à AGH en une commande :
+
+```bash
+docker compose run --rm agh-sync node dist/agh-sync/setup-blocklists.js
+```
+
+Idempotent : n'ajoute que les listes absentes. Bloque la **résolution DNS** des serveurs DoH publics (Cloudflare, Google, Quad9…). Ne bloque pas les IP hardcodées — pour ça il faut des règles de pare-feu en amont de la Freebox (Pi en bridge avec iptables, etc.).
+
+### Détection de bypass
+
+Chaque cycle de réconciliation, le sync compare les hôtes actifs sur la Freebox aux clients qui ont effectivement interrogé AGH dans les 24 dernières heures. Les appareils qui ont de l'activité réseau mais zéro requête DNS via AGH sont considérés suspects et exposés dans `/healthz` sous `suspectedBypassers`. Un log d'avertissement est émis au maximum une fois par jour.
+
 ### Vérification
 
 1. Après démarrage, ouvrir AGH → **Paramètres → Clients** → vos appareils apparaissent avec le tag AGH conventionnel (`device_phone`, `device_laptop`…) quand le mapping s'applique

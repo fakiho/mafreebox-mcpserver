@@ -13,11 +13,13 @@
 
 import { FreeboxClient } from "../freeboxClient.js";
 import { AdGuardHomeClient } from "./aghClient.js";
+import { BypassDetector } from "./bypassDetector.js";
 import { HealthServer } from "./healthServer.js";
 import { LiveWatcher } from "./liveWatcher.js";
 import { NeighborCache } from "./neighborDiscovery.js";
 import { Reconciler } from "./reconciler.js";
 import { StateStore } from "./state.js";
+import type { FreeboxLanHostsResponse } from "./types.js";
 
 const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 type LogLevel = (typeof LOG_LEVELS)[number];
@@ -135,6 +137,29 @@ async function main() {
     neighbors,
   );
   const liveWatcher = new LiveWatcher(agh, reconciler, pollLiveMs, (m) => logger.info(m));
+  const bypassDetector = new BypassDetector(agh, state, (m) => logger.info(m));
+
+  let lastBypassLogAt = 0;
+  const runBypassDetection = async () => {
+    try {
+      const lanResp = (await freebox.getLanHosts({ compact: false, limit: 0 })) as FreeboxLanHostsResponse;
+      const suspects = await bypassDetector.detect(lanResp.hosts);
+      health.recordBypassers(suspects);
+      const nowMs = Date.now();
+      if (suspects.length > 0 && nowMs - lastBypassLogAt > 86400000) {
+        const summary = suspects
+          .slice(0, 10)
+          .map((s) => `${s.aghName ?? s.mac} (${s.mac})`)
+          .join(", ");
+        logger.warn(
+          `[bypass] ${suspects.length} device(s) active on LAN but not querying AGH in 24h: ${summary}${suspects.length > 10 ? " +more" : ""}`,
+        );
+        lastBypassLogAt = nowMs;
+      }
+    } catch (e) {
+      logger.warn(`[bypass] detection failed: ${String(e)}`);
+    }
+  };
 
   const runReconcile = async (label: string) => {
     try {
@@ -158,8 +183,12 @@ async function main() {
   };
 
   await runReconcile("startup: ");
+  await runBypassDetection();
   liveWatcher.start();
-  const reconcileTimer = setInterval(() => runReconcile(""), pollReconcileMs);
+  const reconcileTimer = setInterval(async () => {
+    await runReconcile("");
+    await runBypassDetection();
+  }, pollReconcileMs);
 
   const shutdown = (sig: string) => {
     logger.info(`received ${sig}, shutting down`);

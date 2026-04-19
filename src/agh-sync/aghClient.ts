@@ -3,6 +3,8 @@ import type {
   AghClientDelete,
   AghClientUpdate,
   AghClientsResponse,
+  AghFilteringStatus,
+  AghStats,
 } from "./types.js";
 
 export interface AghClientConfig {
@@ -63,5 +65,25 @@ export class AdGuardHomeClient {
     } catch {
       return false;
     }
+  }
+
+  getStats(): Promise<AghStats> {
+    return this.call<AghStats>("GET", "/control/stats");
+  }
+
+  getFilteringStatus(): Promise<AghFilteringStatus> {
+    return this.call<AghFilteringStatus>("GET", "/control/filtering/status");
+  }
+
+  addFilterUrl(payload: { name: string; url: string; whitelist?: boolean }): Promise<void> {
+    return this.call<void>("POST", "/control/filtering/add_url", {
+      name: payload.name,
+      url: payload.url,
+      whitelist: payload.whitelist ?? false,
+    });
+  }
+
+  refreshFilters(whitelist = false): Promise<void> {
+    return this.call<void>("POST", "/control/filtering/refresh", { whitelist });
   }
 }

@@ -13,6 +13,7 @@
     "start": "node dist/index.js",
     "sync": "node dist/agh-sync/index.js",
     "sync:authorize": "node dist/agh-sync/authorize.js",
+    "sync:setup-blocklists": "node dist/agh-sync/setup-blocklists.js",
     "dev:sync": "tsx watch src/agh-sync/index.ts",
     "prepare": "npm run build",
     "test": "echo \"No tests yet\" && exit 0"

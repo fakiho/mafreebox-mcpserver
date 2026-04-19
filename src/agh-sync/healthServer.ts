@@ -14,6 +14,13 @@ interface HealthState {
   };
   managedMacs: number;
   recentErrors: Array<{ ts: number; msg: string }>;
+  suspectedBypassers: Array<{
+    mac: string;
+    aghName: string | null;
+    lastActiveFreebox: number;
+    ips: string[];
+  }>;
+  bypassLastComputedAt: number;
 }
 
 /**
@@ -37,6 +44,8 @@ export class HealthServer {
     lastReconcileCounts: { added: 0, adopted: 0, updated: 0, deleted: 0, unchanged: 0 },
     managedMacs: 0,
     recentErrors: [],
+    suspectedBypassers: [],
+    bypassLastComputedAt: 0,
   };
 
   constructor(private log: (msg: string) => void) {}
@@ -69,6 +78,11 @@ export class HealthServer {
     this.state.lastReconcileAt = Date.now();
     this.state.lastReconcileCounts = counts;
     this.state.managedMacs = managedMacs;
+  }
+
+  recordBypassers(list: HealthState["suspectedBypassers"]): void {
+    this.state.suspectedBypassers = list;
+    this.state.bypassLastComputedAt = Date.now();
   }
 
   recordError(msg: string): void {
@@ -110,6 +124,11 @@ export class HealthServer {
         ageSec: Math.floor((now - e.ts) / 1000),
         msg: e.msg,
       })),
+      suspectedBypassers: this.state.suspectedBypassers,
+      suspectedBypasserCount: this.state.suspectedBypassers.length,
+      bypassLastComputedAt: this.state.bypassLastComputedAt
+        ? new Date(this.state.bypassLastComputedAt).toISOString()
+        : null,
     };
   }
 

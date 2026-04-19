@@ -36,3 +36,24 @@ USER root
 RUN apk add --no-cache python3 py3-pip \
  && pip3 install --break-system-packages mcp-proxy
 USER node
+
+# agh-sync sidecar — pushes Freebox device names into AdGuard Home persistent clients.
+# Build with: docker build --target agh-sync -t mafreebox-agh-sync .
+# Run: docker run -e AGH_URL=... -e AGH_USER=... -e AGH_PASS=... -v agh-sync-data:/app/data mafreebox-agh-sync
+FROM node:22-alpine AS agh-sync
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
+COPY --from=builder /app/dist ./dist/
+
+RUN mkdir -p /app/data && chown node:node /app/data
+VOLUME ["/app/data"]
+ENV FREEBOX_TOKEN_FILE=/app/data/agh_sync_token.json
+ENV SYNC_STATE_FILE=/app/data/sync_state.json
+
+USER node
+
+ENTRYPOINT ["node", "dist/agh-sync/index.js"]

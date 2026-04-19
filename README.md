@@ -260,6 +260,100 @@ Redémarrez Claude Desktop.
 
 ---
 
+## agh-sync — pont Freebox ↔ AdGuard Home
+
+Service sidecar qui pousse automatiquement le nom et les métadonnées des appareils depuis la Freebox vers AdGuard Home, sans renoncer au DHCP Freebox.
+
+**Problème résolu** : quand AdGuard Home n'est pas le serveur DHCP, il voit les appareils comme de simples IP — noms absents, filtrage par appareil impraticable, journal de requêtes illisible.
+
+**Comment ça marche** :
+- **Voie « live » (3 s)** : surveille `auto_clients` dans AGH, détecte une IP nouvelle, interroge la Freebox, crée le client persistant AGH en < 5 s
+- **Voie « reconcile » (5 min)** : balayage complet des hôtes Freebox, met à jour les renommages, supprime les appareils disparus depuis N jours
+- **Sécurité** : ne touche QUE les clients AGH portant le tag `freebox-sync`. Vos clients créés à la main restent intacts
+
+**Bonus inclus d'office** :
+- Mapping Freebox `host_type` → tags AGH conventionnels (`device_phone`, `device_laptop`, `device_tv`, `device_printer`, `device_camera`…) → les **règles AGH par tag natives** s'appliquent directement, sans config manuelle. Tag brut `freebox_type:<host_type>` conservé pour traçabilité
+- Tag `source:vm` pour les MAC correspondant à une VM Freebox
+- Nom de repli « vendor + 3 derniers octets MAC » quand la Freebox n'a pas de nom (ex. `Apple-AABBCC`)
+
+### Déploiement Docker
+
+> **Note pour une AGH en `--network host`** (cas typique quand AGH gère aussi le DHCP ou utilise `unbound` local) : le sidecar doit utiliser le même mode pour joindre AGH via `127.0.0.1`. C'est la recette par défaut ci-dessous.
+
+```bash
+# 1. Construire l'image sidecar (depuis le repo mafreebox-mcpserver cloné sur le host)
+docker build --target agh-sync -t mafreebox-agh-sync .
+```
+
+#### Recette — AGH en host networking (recommandé)
+
+```yaml
+# docker-compose.yml (ou ajouter le service au compose existant d'AGH)
+services:
+  agh-sync:
+    image: mafreebox-agh-sync:latest
+    container_name: agh-sync
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      FREEBOX_HOST: mafreebox.freebox.fr
+      FREEBOX_APP_ID: fr.freebox.agh-sync
+      AGH_URL: http://127.0.0.1:8081        # port réel — AGH a peut-être un port non-défaut si nginx-proxy-manager occupe déjà 80/81
+      AGH_USER: ${AGH_USER}                 # depuis .env (le nom d'utilisateur admin AGH)
+      AGH_PASS: ${AGH_PASS}                 # depuis .env
+      POLL_LIVE_MS: "3000"
+      POLL_RECONCILE_MS: "300000"
+      RETENTION_DAYS: "30"
+      EXCLUDE_MACS: ""                      # ex : "aa:bb:cc:dd:ee:ff" — la MAC primaire de la VM AGH (évite de se syncer soi-même)
+      LOG_LEVEL: info
+    volumes:
+      - /home/freebox/agh-sync-data:/app/data   # ajustez le chemin selon votre convention
+```
+
+`EXCLUDE_MACS` : récupérez la MAC primaire de la VM AGH avec `ip -br link show | awk '$1!="lo"'` et mettez-la ici.
+
+#### Recette — AGH sur bridge (déploiement fresh)
+
+Si vous installez AGH from-scratch sur un réseau bridge dédié, créez un réseau partagé et utilisez `AGH_URL: http://adguardhome:3000` — voir l'historique git pour l'ancienne recette bridge.
+
+### Première exécution (une seule fois)
+
+Le sidecar a besoin de son propre jeton Freebox (distinct de celui du serveur MCP) :
+
+```bash
+# 1. Autoriser (appuyez sur ">" sur l'écran LCD de la Freebox quand invité)
+docker compose run --rm agh-sync node dist/agh-sync/authorize.js
+
+# 2. Démarrer le sync
+docker compose up -d agh-sync
+docker compose logs -f agh-sync
+```
+
+### Variables d'environnement
+
+| Variable | Défaut | Description |
+|---|---|---|
+| `FREEBOX_HOST` | `mafreebox.freebox.fr` | Hostname Freebox |
+| `FREEBOX_APP_ID` | `fr.freebox.agh-sync` | App ID dédié — ne partagez pas celui du MCP |
+| `FREEBOX_TOKEN_FILE` | `/app/data/agh_sync_token.json` | Token isolé du serveur MCP |
+| `AGH_URL` | _(requis)_ | URL interne d'AdGuard Home (ex. `http://adguardhome:3000`) |
+| `AGH_USER` / `AGH_PASS` | _(requis)_ | Credentials admin AGH (Basic auth) |
+| `POLL_LIVE_MS` | `3000` | Intervalle de la voie live (diff `auto_clients`) |
+| `POLL_RECONCILE_MS` | `300000` | Intervalle du balayage complet (5 min) |
+| `RETENTION_DAYS` | `30` | Délai avant suppression d'un appareil disparu |
+| `EXCLUDE_MACS` | _(vide)_ | Liste de MAC à ignorer (ex. la VM AGH elle-même) |
+| `SYNC_STATE_FILE` | `/app/data/sync_state.json` | Cache MAC → nom AGH pour détection des renommages |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+
+### Vérification
+
+1. Après démarrage, ouvrir AGH → **Paramètres → Clients** → vos appareils apparaissent avec le tag `freebox-sync` + `type:*`
+2. Déconnecter puis reconnecter un téléphone au Wi-Fi : dans `docker logs -f agh-sync`, vous verrez `[live] + iPhone Ali ip=… mac=…` en quelques secondes
+3. Renommer un appareil dans Freebox OS : au prochain tick reconcile, le nom est mis à jour dans AGH
+4. Créer un client manuellement dans AGH (sans le tag `freebox-sync`) → il n'est jamais modifié ni supprimé par le sync
+
+---
+
 ## Architecture
 
 ```

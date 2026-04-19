@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "http";
+import type { MetricsSnapshot } from "./types.js";
 
 interface HealthState {
   startedAt: number;
@@ -21,6 +22,7 @@ interface HealthState {
     ips: string[];
   }>;
   bypassLastComputedAt: number;
+  metrics: MetricsSnapshot | null;
 }
 
 /**
@@ -46,6 +48,7 @@ export class HealthServer {
     recentErrors: [],
     suspectedBypassers: [],
     bypassLastComputedAt: 0,
+    metrics: null,
   };
 
   constructor(private log: (msg: string) => void) {}
@@ -83,6 +86,10 @@ export class HealthServer {
   recordBypassers(list: HealthState["suspectedBypassers"]): void {
     this.state.suspectedBypassers = list;
     this.state.bypassLastComputedAt = Date.now();
+  }
+
+  recordMetrics(m: MetricsSnapshot): void {
+    this.state.metrics = m;
   }
 
   recordError(msg: string): void {
@@ -129,6 +136,8 @@ export class HealthServer {
       bypassLastComputedAt: this.state.bypassLastComputedAt
         ? new Date(this.state.bypassLastComputedAt).toISOString()
         : null,
+      anomalyCount: this.state.metrics?.anomalyCount ?? 0,
+      anomalyGeneratedAt: this.state.metrics?.generatedAt ?? null,
     };
   }
 
@@ -144,6 +153,12 @@ export class HealthServer {
         "Content-Type": "application/json",
         "Cache-Control": "no-store",
       });
+      res.end(body);
+      return;
+    }
+    if (req.url === "/metrics") {
+      const body = JSON.stringify(this.state.metrics ?? { anomalyCount: 0, anomalies: [] }, null, 2);
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
       res.end(body);
       return;
     }

@@ -4,6 +4,7 @@ import type {
   AghClientUpdate,
   AghClientsResponse,
   AghFilteringStatus,
+  AghQueryLogResponse,
   AghStats,
 } from "./types.js";
 
@@ -85,5 +86,12 @@ export class AdGuardHomeClient {
 
   refreshFilters(whitelist = false): Promise<void> {
     return this.call<void>("POST", "/control/filtering/refresh", { whitelist });
+  }
+
+  getQueryLog(opts?: { older_than?: string; limit?: number }): Promise<AghQueryLogResponse> {
+    const params = new URLSearchParams();
+    if (opts?.older_than) params.set("older_than", opts.older_than);
+    params.set("limit", String(opts?.limit ?? 500));
+    return this.call<AghQueryLogResponse>("GET", `/control/querylog?${params.toString()}`);
   }
 }

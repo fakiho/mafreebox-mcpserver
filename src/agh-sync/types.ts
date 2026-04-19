@@ -101,3 +101,67 @@ export interface SuspectedBypasser {
   lastActiveFreebox: number;
   ips: string[];
 }
+
+export interface AghQueryLogItem {
+  time?: string;
+  client?: string;
+  question?: { host?: string; type?: string };
+  answer_dnssec?: unknown;
+  status?: string;
+  reason?: string;
+  filterListId?: number;
+  rule?: string;
+  elapsedMs?: string;
+  upstream?: string;
+}
+
+export interface AghQueryLogResponse {
+  data?: AghQueryLogItem[];
+  oldest?: string;
+}
+
+/** Compact per-query record used for rolling anomaly state. */
+export interface QueryRecord {
+  ts: number;          // epoch seconds
+  clientIp: string;    // source IP (maps to MAC via agh clients + neigh)
+  domain: string;      // normalized lowercase, TLD preserved
+  nxdomain: boolean;
+  blocked: boolean;    // any filter rule matched (filtered/blocked_safebrowsing/…)
+}
+
+/** Per-MAC anomaly state persisted across restarts. */
+export interface AnomalyStateEntry {
+  /** Domain → first-seen unix epoch seconds. Pruned past 7 days. */
+  firstSeenDomains: Record<string, number>;
+  /** Hour-bucket → query count ("2026-04-19-15" → 42). Rolling 24h. */
+  hourlyCounts: Record<string, number>;
+}
+
+export type AnomalyStateByMac = Record<string, AnomalyStateEntry>;
+
+export interface DeviceAnomaly {
+  mac: string;
+  name: string | null;
+  ips: string[];
+  score: number;              // 0-100 weighted composite
+  signals: string[];          // rule names that fired
+  queries_1h: number;
+  queries_24h_avg_per_hour: number;
+  nxdomain_rate: number;      // 0-1, last hour
+  new_domains_1h: number;
+  blocked_hits_24h: number;
+  last_seen_ts: number;
+}
+
+export interface MetricsSnapshot {
+  generatedAt: string;
+  anomalyThreshold: number;
+  anomalyCount: number;
+  anomalies: DeviceAnomaly[];
+  aggregate: {
+    totalManagedMacs: number;
+    totalQueries_1h: number;
+    totalBlocked_24h: number;
+    totalNxdomain_1h: number;
+  };
+}

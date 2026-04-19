@@ -34,6 +34,20 @@ const DEFAULT_BLOCKLISTS: BlocklistEntry[] = [
     name: "Hagezi — DoH/VPN/Proxy bypass (stricter)",
     url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/doh-vpn-proxy-bypass.txt",
   },
+  // Threat-intel lists — hits against these flow into agh-sync's per-device
+  // blocked-hit counter, which feeds the anomaly score (threat_hit signal).
+  {
+    name: "URLhaus — active malware distribution domains",
+    url: "https://urlhaus.abuse.ch/downloads/hostfile/",
+  },
+  {
+    name: "Hagezi — Pro (malware+phishing+trackers, curated)",
+    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt",
+  },
+  {
+    name: "Hagezi — Threat Intelligence Feeds",
+    url: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt",
+  },
 ];
 
 function env(name: string): string {

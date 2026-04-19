@@ -359,6 +359,31 @@ Idempotent : n'ajoute que les listes absentes. Bloque la **résolution DNS** des
 
 Chaque cycle de réconciliation, le sync compare les hôtes actifs sur la Freebox aux clients qui ont effectivement interrogé AGH dans les 24 dernières heures. Les appareils qui ont de l'activité réseau mais zéro requête DNS via AGH sont considérés suspects et exposés dans `/healthz` sous `suspectedBypassers`. Un log d'avertissement est émis au maximum une fois par jour.
 
+### Détection d'anomalies par appareil (Tier 1)
+
+Le sync scanne le journal de requêtes AGH (`/control/querylog`) à chaque cycle et calcule pour chaque MAC géré :
+
+- `queries_1h` : nombre de requêtes DNS l'heure écoulée
+- `queries_24h_avg_per_hour` : moyenne horaire sur 24h (baseline)
+- `nxdomain_rate` : taux de NXDOMAIN sur la dernière heure (indicateur DGA/C2)
+- `new_domains_1h` : domaines jamais vus auparavant par cet appareil dans la dernière heure
+- `blocked_hits_24h` : nombre de requêtes bloquées par une liste (threat-intel)
+- `score` (0-100) : composite pondéré de 4 signaux
+
+**Règles de scoring** :
+| Signal | Condition | Points |
+|---|---|---|
+| `rate_spike` | `queries_1h > 3× baseline` ET `> 50 req/h` | +40 |
+| `nxdomain_high` | `nxdomain_rate > 0.3` ET `queries_1h ≥ 30` | +30 |
+| `first_seen_flood` | `new_domains_1h > 20` | +20 |
+| `threat_hit` | `blocked_hits_24h > 0` | +20 max (≈5 par hit) |
+
+Score ≥ 40 → appareil marqué comme anomalie. Exposé sur deux endpoints :
+- `GET /healthz` → contient `anomalyCount` et `anomalyGeneratedAt`
+- `GET /metrics` → JSON complet avec `anomalies[]` détaillée (MAC, nom, score, signals, chiffres)
+
+Variable d'env facultative : `ANOMALY_STATE_FILE` (défaut `/app/data/anomaly_state.json`) pour le state rolling 7j.
+
 ### Vérification
 
 1. Après démarrage, ouvrir AGH → **Paramètres → Clients** → vos appareils apparaissent avec le tag AGH conventionnel (`device_phone`, `device_laptop`…) quand le mapping s'applique

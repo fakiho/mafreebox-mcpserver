@@ -13,6 +13,8 @@
 
 import { FreeboxClient } from "../freeboxClient.js";
 import { AdGuardHomeClient } from "./aghClient.js";
+import { AnomalyDetector } from "./anomalyDetector.js";
+import { AnomalyStateStore } from "./anomalyState.js";
 import { BypassDetector } from "./bypassDetector.js";
 import { HealthServer } from "./healthServer.js";
 import { LiveWatcher } from "./liveWatcher.js";
@@ -76,6 +78,7 @@ async function main() {
   const retentionDays = envNum("RETENTION_DAYS", 30);
   const excludeMacs = parseMacList(process.env.EXCLUDE_MACS);
   const statePath = process.env.SYNC_STATE_FILE ?? "/app/data/sync_state.json";
+  const anomalyStatePath = process.env.ANOMALY_STATE_FILE ?? "/app/data/anomaly_state.json";
   const healthPort = envNum("HEALTH_PORT", 8090);
   const healthBind = process.env.HEALTH_BIND ?? "0.0.0.0";
   const logLevel = ((process.env.LOG_LEVEL ?? "info").toLowerCase() as LogLevel);
@@ -138,6 +141,30 @@ async function main() {
   );
   const liveWatcher = new LiveWatcher(agh, reconciler, pollLiveMs, (m) => logger.info(m));
   const bypassDetector = new BypassDetector(agh, state, (m) => logger.info(m));
+  const anomalyState = new AnomalyStateStore(anomalyStatePath);
+  const anomalyDetector = new AnomalyDetector(agh, state, anomalyState, (m) => logger.info(m));
+
+  let lastAnomalyLogAt = 0;
+  const runAnomalyDetection = async () => {
+    try {
+      const neighSnap = await neighbors.snapshot();
+      anomalyDetector.updateIpMap(neighSnap);
+      const metrics = await anomalyDetector.run();
+      health.recordMetrics(metrics);
+      const nowMs = Date.now();
+      if (metrics.anomalyCount > 0 && nowMs - lastAnomalyLogAt > 3600_000) {
+        const top = metrics.anomalies.slice(0, 5).map((a) =>
+          `${a.name ?? a.mac}(score=${a.score},${a.signals.join("|")})`,
+        ).join(", ");
+        logger.warn(
+          `[anomaly] ${metrics.anomalyCount} device(s) flagged — top: ${top}${metrics.anomalyCount > 5 ? " +more" : ""}`,
+        );
+        lastAnomalyLogAt = nowMs;
+      }
+    } catch (e) {
+      logger.warn(`[anomaly] detection failed: ${String(e)}`);
+    }
+  };
 
   let lastBypassLogAt = 0;
   const runBypassDetection = async () => {
@@ -184,10 +211,12 @@ async function main() {
 
   await runReconcile("startup: ");
   await runBypassDetection();
+  await runAnomalyDetection();
   liveWatcher.start();
   const reconcileTimer = setInterval(async () => {
     await runReconcile("");
     await runBypassDetection();
+    await runAnomalyDetection();
   }, pollReconcileMs);
 
   const shutdown = (sig: string) => {
@@ -196,6 +225,7 @@ async function main() {
     clearInterval(reconcileTimer);
     health.stop();
     state.save();
+    anomalyState.save();
     process.exit(0);
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

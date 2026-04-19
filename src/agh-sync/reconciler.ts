@@ -162,17 +162,51 @@ export class Reconciler {
     // AGH requires unique names across all persistent clients — disambiguate
     // every duplicate with a MAC-tail suffix so each Freebox device keeps its
     // own identity. Only duplicates are suffixed; unique names stay clean.
-    const nameCount = new Map<string, number>();
-    for (const { client } of desired.values()) {
-      nameCount.set(client.name, (nameCount.get(client.name) ?? 0) + 1);
-    }
+    //
+    // The suffix must actually distinguish the MACs. When two devices share
+    // the same last-N octets (e.g. two Aqara Shapes that only differ in the
+    // first octet), last-3 alone collides. Walk up to more octets until every
+    // member of the duplicate group has a unique suffix; fall back to the
+    // full MAC (guaranteed unique).
+    const dupeGroups = new Map<string, DesiredClient[]>();
     for (const entry of desired.values()) {
-      if ((nameCount.get(entry.client.name) ?? 0) > 1) {
-        const suffix = entry.mac.split(":").slice(-3).join("").toUpperCase();
-        entry.client.name = `${entry.client.name} (${suffix})`;
+      const g = dupeGroups.get(entry.client.name) ?? [];
+      g.push(entry);
+      dupeGroups.set(entry.client.name, g);
+    }
+    for (const [baseName, group] of dupeGroups) {
+      if (group.length < 2) continue;
+      const suffixes = this.uniqueMacSuffixes(group.map((e) => e.mac));
+      for (const entry of group) {
+        entry.client.name = `${baseName} (${suffixes.get(entry.mac)})`;
       }
     }
     return desired;
+  }
+
+  /**
+   * Returns MAC → suffix map, where every suffix is unique within the input.
+   * Tries progressively longer octet tails (3 → 4 → 5 → 6); if collisions
+   * persist, emits the full MAC without separators.
+   */
+  private uniqueMacSuffixes(macs: string[]): Map<string, string> {
+    for (let n = 3; n <= 6; n++) {
+      const out = new Map<string, string>();
+      const seen = new Set<string>();
+      let conflict = false;
+      for (const mac of macs) {
+        const suffix = mac.split(":").slice(-n).join("").toUpperCase();
+        if (seen.has(suffix)) { conflict = true; break; }
+        seen.add(suffix);
+        out.set(mac, suffix);
+      }
+      if (!conflict) return out;
+    }
+    const fallback = new Map<string, string>();
+    for (const mac of macs) {
+      fallback.set(mac, mac.split(":").join("").toUpperCase());
+    }
+    return fallback;
   }
 
   private collectVmMacs(raw: unknown): Set<string> {

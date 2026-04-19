@@ -9,6 +9,24 @@ import type {
   FreeboxRawHost,
 } from "./types.js";
 
+/**
+ * Filters out addresses that are noise in AGH client ids:
+ * - IPv6 link-local (fe80::/10) — never reaches AGH's DNS listener
+ * - IPv4 link-local / APIPA (169.254.0.0/16)
+ * - Unspecified / malformed (e.g. "2a01:e0a:239:cdd0::" — a /64 prefix with
+ *   null host that some routers emit as a neighbor placeholder)
+ */
+function isRoutableIp(addr: string | undefined | null): boolean {
+  if (!addr) return false;
+  const ip = addr.toLowerCase().trim();
+  if (!ip) return false;
+  if (ip.startsWith("fe80:")) return false;
+  if (ip.startsWith("169.254.")) return false;
+  if (ip === "0.0.0.0" || ip === "::" || ip === "::0") return false;
+  if (ip.endsWith("::")) return false; // null host (e.g. prefix-only)
+  return true;
+}
+
 // AGH DOES enforce a server-side allowlist on tags (empirically: POST
 // /control/clients/add returns HTTP 400 "invalid tag: X" for any tag outside
 // the 21 constants in internal/client/storage.go's allowedTags).
@@ -70,12 +88,10 @@ export class Reconciler {
     const conns: FreeboxL3Connectivity[] = Array.isArray(host.l3connectivities)
       ? host.l3connectivities
       : [];
-    const v4 =
-      conns.find((c) => c.af === "ipv4" && c.active) ??
-      conns.find((c) => c.af === "ipv4");
-    const v6 =
-      conns.find((c) => c.af === "ipv6" && c.active) ??
-      conns.find((c) => c.af === "ipv6");
+    const usefulV4 = conns.filter((c) => c.af === "ipv4" && isRoutableIp(c.addr));
+    const usefulV6 = conns.filter((c) => c.af === "ipv6" && isRoutableIp(c.addr));
+    const v4 = usefulV4.find((c) => c.active) ?? usefulV4[0];
+    const v6 = usefulV6.find((c) => c.active) ?? usefulV6[0];
     return { ipv4: v4?.addr ?? null, ipv6: v6?.addr ?? null };
   }
 
@@ -122,7 +138,9 @@ export class Reconciler {
       // Merge addresses the host kernel has observed for this MAC — catches
       // SLAAC and IPv6 privacy addresses Freebox doesn't report.
       const kernelIps = neighborMap.get(mac);
-      if (kernelIps) for (const ip of kernelIps) ids.add(ip);
+      if (kernelIps) for (const ip of kernelIps) {
+        if (isRoutableIp(ip)) ids.add(ip);
+      }
 
       desired.set(mac, {
         mac,
@@ -285,7 +303,9 @@ export class Reconciler {
     if (ipv6) ids.add(ipv6);
     if (this.neighbors) {
       const kernelIps = (await this.neighbors.snapshot()).get(mac);
-      if (kernelIps) for (const ipAddr of kernelIps) ids.add(ipAddr);
+      if (kernelIps) for (const ipAddr of kernelIps) {
+        if (isRoutableIp(ipAddr)) ids.add(ipAddr);
+      }
     }
 
     const client: AghClient = {

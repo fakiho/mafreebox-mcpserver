@@ -10,7 +10,9 @@ import type {
 const CONFIRM_TTL_SEC = 24 * 3600;
 
 export interface IsolationConfig {
-  allowlist: Set<string>;      // MACs never to be touched
+  /** Seed allowlist from env — used only if the state file doesn't yet
+   *  have an allowlist array. Post-seed, the file is authoritative. */
+  envAllowlistSeed: Set<string>;
   autoEnabled: boolean;
   autoScoreThreshold: number;
   defaultDurationSec: number;
@@ -40,7 +42,10 @@ export interface ApplyOpts {
  *   we don't run our own un-block timers on the happy path.
  */
 export class IsolationManager {
-  private state: IsolationStateFile = { isolations: [], confirmedMacs: {} };
+  private state: IsolationStateFile = { isolations: [], confirmedMacs: {}, allowlist: [] };
+  /** Cached effective allowlist set (lowercased, normalized). Rebuilt on
+   *  every mutation so hot-path isAllowlisted() is O(1). */
+  private allowlistSet: Set<string> = new Set();
 
   constructor(
     private freebox: FreeboxClient,
@@ -51,18 +56,31 @@ export class IsolationManager {
   }
 
   private load(): void {
-    if (!existsSync(this.cfg.statePath)) return;
-    try {
-      const raw = JSON.parse(readFileSync(this.cfg.statePath, "utf8"));
-      if (raw && typeof raw === "object") {
-        this.state = {
-          isolations: Array.isArray(raw.isolations) ? raw.isolations : [],
-          confirmedMacs: (raw.confirmedMacs && typeof raw.confirmedMacs === "object") ? raw.confirmedMacs : {},
-        };
+    if (existsSync(this.cfg.statePath)) {
+      try {
+        const raw = JSON.parse(readFileSync(this.cfg.statePath, "utf8"));
+        if (raw && typeof raw === "object") {
+          this.state = {
+            isolations: Array.isArray(raw.isolations) ? raw.isolations : [],
+            confirmedMacs: (raw.confirmedMacs && typeof raw.confirmedMacs === "object") ? raw.confirmedMacs : {},
+            allowlist: Array.isArray(raw.allowlist) ? raw.allowlist : [],
+          };
+        }
+      } catch {
+        // fall through to env seed below
       }
-    } catch {
-      // leave default
     }
+    // Seed from env on first boot (no allowlist yet OR empty).
+    if (this.state.allowlist.length === 0 && this.cfg.envAllowlistSeed.size > 0) {
+      this.state.allowlist = Array.from(this.cfg.envAllowlistSeed);
+      this.log(`[isolation] seeded allowlist from env with ${this.state.allowlist.length} MAC(s)`);
+      this.save();
+    }
+    this.rebuildAllowlistSet();
+  }
+
+  private rebuildAllowlistSet(): void {
+    this.allowlistSet = new Set(this.state.allowlist.map((m) => this.normalizeMac(m)));
   }
 
   save(): void {
@@ -82,7 +100,52 @@ export class IsolationManager {
   }
 
   isAllowlisted(mac: string): boolean {
-    return this.cfg.allowlist.has(this.normalizeMac(mac));
+    return this.allowlistSet.has(this.normalizeMac(mac));
+  }
+
+  /** Adds a MAC to the dynamic allowlist. Idempotent. Automatically
+   *  revokes any active isolation on that MAC (trusting a device implies
+   *  we don't want it blocked). Returns true if newly added. */
+  async addToAllowlist(mac: string): Promise<{ added: boolean; revokedIsolation: boolean }> {
+    const m = this.normalizeMac(mac);
+    if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(m)) {
+      throw new IsolationError("bad_mac", `Invalid MAC format: ${mac}`);
+    }
+    if (this.allowlistSet.has(m)) return { added: false, revokedIsolation: false };
+    this.state.allowlist.push(m);
+    this.rebuildAllowlistSet();
+    this.log(`[isolation] + allowlist ${m}`);
+    // Lifting any active isolation for newly-trusted MAC keeps semantics clean.
+    let revoked = false;
+    if (this.state.isolations.some((r) => r.mac === m)) {
+      try {
+        await this.revoke(m);
+        revoked = true;
+      } catch (e) {
+        this.log(`[isolation] allowlist add: revoke failed for ${m}: ${String(e)}`);
+      }
+    }
+    this.save();
+    return { added: true, revokedIsolation: revoked };
+  }
+
+  /** Removes a MAC from the dynamic allowlist. Idempotent. */
+  removeFromAllowlist(mac: string): boolean {
+    const m = this.normalizeMac(mac);
+    if (!/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(m)) {
+      throw new IsolationError("bad_mac", `Invalid MAC format: ${mac}`);
+    }
+    const before = this.state.allowlist.length;
+    this.state.allowlist = this.state.allowlist.filter((x) => this.normalizeMac(x) !== m);
+    if (this.state.allowlist.length === before) return false;
+    this.rebuildAllowlistSet();
+    this.log(`[isolation] - allowlist ${m}`);
+    this.save();
+    return true;
+  }
+
+  listAllowlist(): string[] {
+    return Array.from(this.allowlistSet).sort();
   }
 
   isCurrentlyIsolated(mac: string): boolean {
@@ -209,7 +272,7 @@ export class IsolationManager {
 
   getConfig(): { allowlist: string[]; autoEnabled: boolean; autoScoreThreshold: number; defaultDurationSec: number } {
     return {
-      allowlist: Array.from(this.cfg.allowlist),
+      allowlist: this.listAllowlist(),
       autoEnabled: this.cfg.autoEnabled,
       autoScoreThreshold: this.cfg.autoScoreThreshold,
       defaultDurationSec: this.cfg.defaultDurationSec,

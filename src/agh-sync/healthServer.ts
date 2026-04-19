@@ -182,6 +182,18 @@ export class HealthServer {
       this.handleUnisolate(req, res).catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
       return;
     }
+    if (req.method === "GET" && req.url === "/allowlist") {
+      this.handleListAllowlist(res);
+      return;
+    }
+    if (req.method === "POST" && req.url === "/allowlist/add") {
+      this.handleAllowlistMutate(req, res, "add").catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
+      return;
+    }
+    if (req.method === "POST" && req.url === "/allowlist/remove") {
+      this.handleAllowlistMutate(req, res, "remove").catch((e) => this.replyError(res, 500, `internal: ${String(e)}`));
+      return;
+    }
     res.writeHead(404, { "Content-Type": "text/plain" }).end("not found\n");
   }
 
@@ -255,6 +267,45 @@ export class HealthServer {
       const existed = await this.isolation.revoke(mac);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, existed }, null, 2));
+    } catch (e) {
+      if (e instanceof IsolationError) {
+        const status = e.code === "bad_mac" ? 400 : 500;
+        return this.replyError(res, status, e.message, e.code);
+      }
+      return this.replyError(res, 500, `internal: ${String(e)}`);
+    }
+  }
+
+  private handleListAllowlist(res: ServerResponse): void {
+    if (!this.isolation) return this.replyError(res, 503, "isolation manager not attached");
+    const body = JSON.stringify({
+      allowlist: this.isolation.listAllowlist(),
+    }, null, 2);
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+    res.end(body);
+  }
+
+  private async handleAllowlistMutate(req: IncomingMessage, res: ServerResponse, op: "add" | "remove"): Promise<void> {
+    if (!this.isolation) return this.replyError(res, 503, "isolation manager not attached");
+    if (!this.authorized(req)) return this.replyError(res, 403, "invalid or missing X-Isolation-Key header");
+    let body: Record<string, unknown>;
+    try {
+      body = await this.readJsonBody(req);
+    } catch (e) {
+      return this.replyError(res, 400, `bad JSON body: ${String(e)}`);
+    }
+    const mac = typeof body.mac === "string" ? body.mac : "";
+    if (!mac) return this.replyError(res, 400, "missing `mac` field");
+    try {
+      if (op === "add") {
+        const { added, revokedIsolation } = await this.isolation.addToAllowlist(mac);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, added, revokedIsolation, allowlist: this.isolation.listAllowlist() }, null, 2));
+      } else {
+        const removed = this.isolation.removeFromAllowlist(mac);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, removed, allowlist: this.isolation.listAllowlist() }, null, 2));
+      }
     } catch (e) {
       if (e instanceof IsolationError) {
         const status = e.code === "bad_mac" ? 400 : 500;

@@ -136,7 +136,7 @@ async function main() {
   const isolation = new IsolationManager(
     freebox,
     {
-      allowlist: bypassAllowlist,
+      envAllowlistSeed: bypassAllowlist,
       autoEnabled: autoIsolateEnabled,
       autoScoreThreshold: autoIsolateScoreThreshold,
       defaultDurationSec: isolationDurationHours * 3600,

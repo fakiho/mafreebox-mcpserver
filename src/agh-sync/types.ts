@@ -199,6 +199,10 @@ export interface IsolationStateFile {
   /** MAC → epoch seconds when user last confirmed an isolation for it.
    *  Used to auto-skip confirmation on repeat offenders within 24h. */
   confirmedMacs: Record<string, number>;
+  /** Dynamic allowlist — MACs that must never be isolated. Env
+   *  `BYPASS_ALLOWLIST` seeds this on first boot; after that, the file
+   *  is authoritative and entries are managed via /allowlist/add|remove. */
+  allowlist: string[];
 }
 
 export interface FreeboxParentalFilter {

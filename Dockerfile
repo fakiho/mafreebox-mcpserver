@@ -56,4 +56,6 @@ ENV SYNC_STATE_FILE=/app/data/sync_state.json
 
 USER node
 
-ENTRYPOINT ["node", "dist/agh-sync/index.js"]
+# CMD (not ENTRYPOINT) so `docker compose run agh-sync node dist/agh-sync/authorize.js`
+# substitutes cleanly instead of appending to a fixed entrypoint.
+CMD ["node", "dist/agh-sync/index.js"]

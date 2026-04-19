@@ -44,6 +44,12 @@ FROM node:22-alpine AS agh-sync
 
 WORKDIR /app
 
+# iproute2 gives us `ip -6 neigh show` to read the host's NDP cache.
+# Container runs with network_mode: host, so this reveals every IPv6 address
+# the AGH VM's kernel has seen on the LAN — much richer than what Freebox
+# reports in /lan/browser (which is DHCP/ARP-only).
+RUN apk add --no-cache iproute2
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 

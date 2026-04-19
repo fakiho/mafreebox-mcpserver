@@ -1,5 +1,6 @@
 import type { FreeboxClient } from "../freeboxClient.js";
 import type { AdGuardHomeClient } from "./aghClient.js";
+import type { NeighborCache } from "./neighborDiscovery.js";
 import type { StateStore } from "./state.js";
 import type {
   AghClient,
@@ -55,6 +56,7 @@ export class Reconciler {
     private state: StateStore,
     private cfg: ReconcilerConfig,
     private log: (msg: string) => void,
+    private neighbors: NeighborCache | null = null,
   ) {}
 
   normalizeMac(raw: string | null | undefined): string | null {
@@ -105,6 +107,7 @@ export class Reconciler {
 
     const vms = (await this.freebox.getVMs().catch(() => [])) as unknown;
     const vmMacs = this.collectVmMacs(vms);
+    const neighborMap = this.neighbors ? await this.neighbors.snapshot() : new Map<string, Set<string>>();
 
     const desired = new Map<string, DesiredClient>();
     for (const host of lanResp.hosts) {
@@ -113,16 +116,20 @@ export class Reconciler {
       if (this.cfg.excludeMacs.has(mac)) continue;
 
       const { ipv4, ipv6 } = this.pickIps(host);
-      const ids = [mac];
-      if (ipv4) ids.push(ipv4);
-      if (ipv6) ids.push(ipv6);
+      const ids = new Set<string>([mac]);
+      if (ipv4) ids.add(ipv4);
+      if (ipv6) ids.add(ipv6);
+      // Merge addresses the host kernel has observed for this MAC — catches
+      // SLAAC and IPv6 privacy addresses Freebox doesn't report.
+      const kernelIps = neighborMap.get(mac);
+      if (kernelIps) for (const ip of kernelIps) ids.add(ip);
 
       desired.set(mac, {
         mac,
         rawType: host.host_type,
         client: {
           name: this.buildName(host, mac),
-          ids,
+          ids: Array.from(ids),
           tags: this.buildTags(host, vmMacs.has(mac)),
           use_global_settings: true,
           use_global_blocked_services: true,
@@ -273,13 +280,17 @@ export class Reconciler {
     const vms = (await this.freebox.getVMs().catch(() => [])) as unknown;
     const vmMacs = this.collectVmMacs(vms);
     const { ipv4, ipv6 } = this.pickIps(host);
-    const ids = [mac];
-    if (ipv4) ids.push(ipv4);
-    if (ipv6) ids.push(ipv6);
+    const ids = new Set<string>([mac]);
+    if (ipv4) ids.add(ipv4);
+    if (ipv6) ids.add(ipv6);
+    if (this.neighbors) {
+      const kernelIps = (await this.neighbors.snapshot()).get(mac);
+      if (kernelIps) for (const ipAddr of kernelIps) ids.add(ipAddr);
+    }
 
     const client: AghClient = {
       name: this.buildName(host, mac),
-      ids,
+      ids: Array.from(ids),
       tags: this.buildTags(host, vmMacs.has(mac)),
       use_global_settings: true,
       use_global_blocked_services: true,

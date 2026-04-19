@@ -14,6 +14,7 @@
 import { FreeboxClient } from "../freeboxClient.js";
 import { AdGuardHomeClient } from "./aghClient.js";
 import { LiveWatcher } from "./liveWatcher.js";
+import { NeighborCache } from "./neighborDiscovery.js";
 import { Reconciler } from "./reconciler.js";
 import { StateStore } from "./state.js";
 
@@ -112,12 +113,14 @@ async function main() {
   logger.info("agh reachable");
 
   const state = new StateStore(statePath);
+  const neighbors = new NeighborCache((m) => logger.info(m));
   const reconciler = new Reconciler(
     freebox,
     agh,
     state,
     { retentionDays, excludeMacs },
     (m) => logger.info(m),
+    neighbors,
   );
   const liveWatcher = new LiveWatcher(agh, reconciler, pollLiveMs, (m) => logger.info(m));
 

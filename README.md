@@ -269,7 +269,8 @@ Service sidecar qui pousse automatiquement le nom et les métadonnées des appar
 **Comment ça marche** :
 - **Voie « live » (3 s)** : surveille `auto_clients` dans AGH, détecte une IP nouvelle, interroge la Freebox, crée le client persistant AGH en < 5 s
 - **Voie « reconcile » (5 min)** : balayage complet des hôtes Freebox, met à jour les renommages, supprime les appareils disparus depuis N jours
-- **Sécurité** : un fichier d'état local (`sync_state.json`) mémorise quels MAC ont été créés par le sync. Les clients AGH créés à la main ne sont jamais modifiés ni supprimés — AGH impose une liste fermée de tags, donc un tag-marqueur n'est pas possible
+- **Politique d'autorité** : la Freebox est la source de vérité. Sur collision (nom, IP, MAC), le client AGH existant est adopté/réécrit avec les données Freebox ; les clients AGH sans lien avec la Freebox restent intacts. Les doublons de noms côté Freebox (4 iPhones, etc.) sont désambiguïsés avec un suffixe MAC (ex. `iPhone (A5:18:D4)`)
+- **Fichier d'état** : `sync_state.json` mémorise les MAC gérées par le sync pour l'historique et la rétention (suppression après `RETENTION_DAYS` d'inactivité Freebox)
 
 **Bonus inclus d'office** :
 - Mapping Freebox `host_type` → tags AGH conventionnels (`device_phone`, `device_laptop`, `device_tv`, `device_printer`, `device_camera`…) → les **règles AGH par tag natives** s'appliquent directement. Seule la liste officielle AGH (21 tags) est autorisée côté serveur, donc les types Freebox sans correspondance directe n'ajoutent aucun tag

@@ -45,6 +45,7 @@ export interface ReconcilerConfig {
 export interface DesiredClient {
   mac: string;
   client: AghClient;
+  rawType?: string;
 }
 
 export class Reconciler {
@@ -118,6 +119,7 @@ export class Reconciler {
 
       desired.set(mac, {
         mac,
+        rawType: host.host_type,
         client: {
           name: this.buildName(host, mac),
           ids,
@@ -129,6 +131,21 @@ export class Reconciler {
           safebrowsing_enabled: false,
         },
       });
+    }
+
+    // Freebox devices can share a display name (4 iPhones, 3 Macs, etc.).
+    // AGH requires unique names across all persistent clients — disambiguate
+    // every duplicate with a MAC-tail suffix so each Freebox device keeps its
+    // own identity. Only duplicates are suffixed; unique names stay clean.
+    const nameCount = new Map<string, number>();
+    for (const { client } of desired.values()) {
+      nameCount.set(client.name, (nameCount.get(client.name) ?? 0) + 1);
+    }
+    for (const entry of desired.values()) {
+      if ((nameCount.get(entry.client.name) ?? 0) > 1) {
+        const suffix = entry.mac.split(":").slice(-3).join("").toUpperCase();
+        entry.client.name = `${entry.client.name} (${suffix})`;
+      }
     }
     return desired;
   }
@@ -157,84 +174,84 @@ export class Reconciler {
     return macs;
   }
 
-  async reconcile(): Promise<{ added: number; updated: number; deleted: number; unchanged: number; skipped: number }> {
+  async reconcile(): Promise<{ added: number; adopted: number; updated: number; deleted: number; unchanged: number }> {
     const desired = await this.buildDesiredSet();
     const aghResp = await this.agh.listClients();
-    const stateMacs = new Set(this.state.macs());
 
-    // A client is "ours" iff its MAC appears in our state ledger. Everything
-    // else in AGH is user-owned and must never be touched.
-    const managedByMac = new Map<string, AghClient>();
-    const unmanagedByMac = new Map<string, AghClient>();
+    // Index AGH clients by MAC and by name. Both views are needed: MAC finds
+    // "same device" even if named differently; name finds conflicts during add.
+    const aghByMac = new Map<string, AghClient>();
+    const aghByName = new Map<string, AghClient>();
     for (const c of aghResp.clients ?? []) {
-      const macId = c.ids.find((id) => this.normalizeMac(id) !== null);
-      const n = this.normalizeMac(macId ?? null);
-      if (!n) continue;
-      if (stateMacs.has(n)) managedByMac.set(n, c);
-      else unmanagedByMac.set(n, c);
+      aghByName.set(c.name, c);
+      for (const id of c.ids) {
+        const n = this.normalizeMac(id);
+        if (n) aghByMac.set(n, c);
+      }
     }
 
     const now = Math.floor(Date.now() / 1000);
     let added = 0;
+    let adopted = 0;
     let updated = 0;
     let deleted = 0;
     let unchanged = 0;
-    let skipped = 0;
 
-    for (const [mac, { client }] of desired) {
-      const existing = managedByMac.get(mac);
-      const stateEntry = this.state.get(mac);
-      if (!existing) {
-        if (unmanagedByMac.has(mac)) {
-          skipped++;
+    for (const [mac, desiredEntry] of desired) {
+      const { client } = desiredEntry;
+      const existing = aghByMac.get(mac);
+      const wasManaged = this.state.get(mac) !== undefined;
+
+      if (existing) {
+        if (this.clientEquals(existing, client)) {
+          this.state.upsert({ mac, aghName: client.name, lastSeen: now });
+          unchanged++;
           continue;
         }
-        try {
-          await this.agh.addClient(client);
-          this.state.upsert({ mac, aghName: client.name, lastSeen: now });
-          this.log(`[reconcile] + ${client.name} (${mac}) tags=${(client.tags ?? []).join(",") || "-"}`);
-          added++;
-        } catch (e) {
-          this.log(`[reconcile] add failed for ${client.name} (${mac}): ${String(e)}`);
+        const upsertResult = await this.updateWithConflictHandling(existing.name, client, mac);
+        if (upsertResult) {
+          this.state.upsert({ mac, aghName: upsertResult.name, lastSeen: now });
+          if (wasManaged) {
+            this.log(`[reconcile] ~ "${existing.name}" → "${upsertResult.name}" (${mac})`);
+            updated++;
+          } else {
+            this.log(`[reconcile] adopted "${existing.name}" → "${upsertResult.name}" (${mac}) — Freebox authoritative`);
+            adopted++;
+          }
         }
         continue;
       }
 
-      if (this.clientEquals(existing, client)) {
-        this.state.upsert({ mac, aghName: client.name, lastSeen: now });
-        unchanged++;
-        continue;
-      }
-
-      const lookupName = stateEntry?.aghName ?? existing.name;
-      try {
-        await this.agh.updateClient({ name: lookupName, data: client });
-        this.state.upsert({ mac, aghName: client.name, lastSeen: now });
-        this.log(`[reconcile] ~ ${lookupName} → ${client.name} (${mac})`);
-        updated++;
-      } catch (e) {
-        this.log(`[reconcile] update failed for ${lookupName} (${mac}): ${String(e)}`);
+      const addResult = await this.addWithConflictHandling(client, mac);
+      if (addResult) {
+        this.state.upsert({ mac, aghName: addResult.name, lastSeen: now });
+        const typeHint = this.rawTypeHint(desiredEntry);
+        this.log(`[reconcile] + ${addResult.name} (${mac}) tags=${(addResult.tags ?? []).join(",") || "-"}${typeHint}`);
+        added++;
       }
     }
 
+    // Retention: delete OUR clients (state-tracked) whose MACs no longer appear
+    // in Freebox. User-owned AGH clients unrelated to Freebox are never deleted.
     const retentionSec = this.cfg.retentionDays * 86400;
-    for (const [mac, client] of managedByMac) {
+    for (const mac of this.state.macs()) {
       if (desired.has(mac)) continue;
       const entry = this.state.get(mac);
       const lastSeen = entry?.lastSeen ?? 0;
       if (now - lastSeen < retentionSec) continue;
+      const aghClient = aghByMac.get(mac);
       try {
-        await this.agh.deleteClient({ name: client.name });
+        if (aghClient) await this.agh.deleteClient({ name: aghClient.name });
         this.state.remove(mac);
-        this.log(`[reconcile] - ${client.name} (${mac}, stale > ${this.cfg.retentionDays}d)`);
+        this.log(`[reconcile] - ${aghClient?.name ?? mac} (${mac}, stale > ${this.cfg.retentionDays}d)`);
         deleted++;
       } catch (e) {
-        this.log(`[reconcile] delete failed for ${client.name} (${mac}): ${String(e)}`);
+        this.log(`[reconcile] delete failed for ${aghClient?.name ?? mac} (${mac}): ${String(e)}`);
       }
     }
 
     this.state.save();
-    return { added, updated, deleted, unchanged, skipped };
+    return { added, adopted, updated, deleted, unchanged };
   }
 
   async enrichByIp(ip: string): Promise<boolean> {
@@ -279,10 +296,11 @@ export class Reconciler {
 
     const now = Math.floor(Date.now() / 1000);
     if (!existing) {
-      await this.agh.addClient(client);
-      this.state.upsert({ mac, aghName: client.name, lastSeen: now });
+      const saved = await this.addWithConflictHandling(client, mac);
+      if (!saved) return false;
+      this.state.upsert({ mac, aghName: saved.name, lastSeen: now });
       this.state.save();
-      this.log(`[live] + ${client.name} ip=${ip} mac=${mac}`);
+      this.log(`[live] + ${saved.name} ip=${ip} mac=${mac}`);
       return true;
     }
     if (!isManaged) {
@@ -301,6 +319,113 @@ export class Reconciler {
     this.state.save();
     this.log(`[live] ~ ${lookupName} → ${client.name} ip=${ip} mac=${mac}`);
     return true;
+  }
+
+  /**
+   * Policy: Freebox is the source of truth. On conflict, the colliding AGH
+   * client is deleted and Freebox's data replaces it. The only exception is
+   * duplicate names within the Freebox set itself — those are pre-disambiguated
+   * with a MAC-tail suffix before this function is called, so any name/IP
+   * collision here is guaranteed to be with a *non-Freebox-backed* AGH client
+   * (either pre-existing user data or orphaned from an earlier sync).
+   */
+  private async addWithConflictHandling(
+    client: AghClient,
+    mac: string,
+  ): Promise<AghClient | null> {
+    try {
+      await this.agh.addClient(client);
+      return client;
+    } catch (e) {
+      const msg = String(e);
+      const nameMatch = msg.match(/uses the same name "([^"]+)"/);
+      if (nameMatch) {
+        await this.evictAndRetry(nameMatch[1], client, mac, "name");
+        return client;
+      }
+      const ipMatch = msg.match(/another client "([^"]+)" uses the same IP/);
+      if (ipMatch) {
+        await this.evictAndRetry(ipMatch[1], client, mac, "IP");
+        return client;
+      }
+      this.log(`[reconcile] add failed for "${client.name}" (${mac}): ${msg}`);
+      return null;
+    }
+  }
+
+  /**
+   * Like addWithConflictHandling but issues an update (client already exists
+   * under `currentName`). Used to adopt a pre-existing AGH client whose MAC
+   * matches a Freebox host, or to update one we created earlier.
+   */
+  private async updateWithConflictHandling(
+    currentName: string,
+    client: AghClient,
+    mac: string,
+  ): Promise<AghClient | null> {
+    try {
+      await this.agh.updateClient({ name: currentName, data: client });
+      return client;
+    } catch (e) {
+      const msg = String(e);
+      const nameMatch = msg.match(/uses the same name "([^"]+)"/);
+      if (nameMatch && nameMatch[1] !== currentName) {
+        await this.agh.deleteClient({ name: nameMatch[1] }).catch(() => {});
+        this.log(`[reconcile]   evicted "${nameMatch[1]}" to free name for "${client.name}"`);
+        try {
+          await this.agh.updateClient({ name: currentName, data: client });
+          return client;
+        } catch (e2) {
+          this.log(`[reconcile] update failed after name eviction for "${client.name}" (${mac}): ${String(e2)}`);
+          return null;
+        }
+      }
+      const ipMatch = msg.match(/another client "([^"]+)" uses the same IP/);
+      if (ipMatch && ipMatch[1] !== currentName) {
+        await this.agh.deleteClient({ name: ipMatch[1] }).catch(() => {});
+        this.log(`[reconcile]   evicted "${ipMatch[1]}" to free IP for "${client.name}"`);
+        try {
+          await this.agh.updateClient({ name: currentName, data: client });
+          return client;
+        } catch (e2) {
+          this.log(`[reconcile] update failed after IP eviction for "${client.name}" (${mac}): ${String(e2)}`);
+          return null;
+        }
+      }
+      this.log(`[reconcile] update failed for "${currentName}" → "${client.name}" (${mac}): ${msg}`);
+      return null;
+    }
+  }
+
+  private async evictAndRetry(
+    collidingName: string,
+    client: AghClient,
+    mac: string,
+    conflict: "name" | "IP",
+  ): Promise<void> {
+    this.log(`[reconcile]   ${conflict} conflict — evicting "${collidingName}" to make room for Freebox "${client.name}" (${mac})`);
+    await this.agh.deleteClient({ name: collidingName }).catch(() => {});
+    this.state.remove(this.findStateMacByName(collidingName) ?? "__none__");
+    await this.agh.addClient(client);
+  }
+
+  private findStateMacByName(name: string): string | null {
+    for (const entry of this.state.all()) {
+      if (entry.aghName === name) return entry.mac;
+    }
+    return null;
+  }
+
+  /**
+   * If the desired client has no mapped AGH tag, append the raw Freebox
+   * host_type to the log so the mapping can be expanded. Cheap feedback loop.
+   */
+  private rawTypeHint(desired: DesiredClient | undefined): string {
+    if (!desired) return "";
+    const hasTag = (desired.client.tags ?? []).length > 0;
+    if (hasTag) return "";
+    if (!desired.rawType) return "";
+    return ` [host_type=${desired.rawType}]`;
   }
 
   private clientEquals(a: AghClient, b: AghClient): boolean {

@@ -124,7 +124,7 @@ async function main() {
   try {
     const res = await reconciler.reconcile();
     logger.info(
-      `[reconcile] startup: added=${res.added} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged} skipped=${res.skipped}`,
+      `[reconcile] startup: added=${res.added} adopted=${res.adopted} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged}`,
     );
   } catch (e) {
     logger.error(`startup reconcile failed: ${String(e)}`);
@@ -135,7 +135,7 @@ async function main() {
     try {
       const res = await reconciler.reconcile();
       logger.info(
-        `[reconcile] added=${res.added} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged} skipped=${res.skipped}`,
+        `[reconcile] added=${res.added} adopted=${res.adopted} updated=${res.updated} deleted=${res.deleted} unchanged=${res.unchanged}`,
       );
     } catch (e) {
       logger.error(`reconcile failed: ${String(e)}`);

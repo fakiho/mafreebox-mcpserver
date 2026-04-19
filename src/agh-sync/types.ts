@@ -67,6 +67,8 @@ export interface SyncStateEntry {
   mac: string;
   aghName: string;
   lastSeen: number;
+  /** Freebox host_type for device-aware thresholds + LLM context. */
+  hostType?: string | null;
 }
 
 export type SyncState = Record<string, SyncStateEntry>;
@@ -138,10 +140,16 @@ export interface QueryRecord {
 }
 
 /** URLs we consider "threat intelligence" — blocks here count toward
- *  compromise scoring. Ad/tracker blocks and user rules do not. */
+ *  compromise scoring. Ad/tracker blocks and user rules do not.
+ *
+ *  IMPORTANT: Hagezi Pro (pro.txt) is intentionally NOT here. Pro mixes
+ *  malware + ads + trackers, so every phone/laptop routinely hits it
+ *  via ad-block activity and would score false-positive threat_hits.
+ *  Pro is still a great *blocklist* (installed via setup-blocklists.js);
+ *  just not a trustworthy compromise signal. URLhaus and TIF are
+ *  malware-specific. */
 export const THREAT_INTEL_BLOCKLIST_URLS: ReadonlySet<string> = new Set([
   "https://urlhaus.abuse.ch/downloads/hostfile/",
-  "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt",
   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt",
 ]);
 
@@ -158,6 +166,7 @@ export type AnomalyStateByMac = Record<string, AnomalyStateEntry>;
 export interface DeviceAnomaly {
   mac: string;
   name: string | null;
+  host_type: string | null;   // "smartphone", "laptop", "iot", etc — from Freebox
   ips: string[];
   score: number;              // 0-100 weighted composite
   signals: string[];          // rule names that fired
@@ -165,6 +174,7 @@ export interface DeviceAnomaly {
   queries_24h_avg_per_hour: number;
   nxdomain_rate: number;      // 0-1, last hour
   new_domains_1h: number;
+  new_domains_threshold: number;  // the threshold actually applied (differs by device type)
   blocked_hits_24h: number;   // total blocks (user + list + threat)
   threat_intel_hits_24h: number; // subset — only threat-intel list matches
   last_seen_ts: number;

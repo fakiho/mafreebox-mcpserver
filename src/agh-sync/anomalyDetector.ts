@@ -13,6 +13,29 @@ const SCORE_THRESHOLD = 40;
 const BOOTSTRAP_GRACE_SEC = 3600;  // skip first_seen_flood during first hour of uptime
 
 /**
+ * Thresholds for the `first_seen_flood` signal vary by device class. Phones
+ * and laptops browse the web and routinely hit 100+ new domains per hour
+ * via Safari, apps, trackers. IoT devices (plugs, sensors, cameras) typically
+ * talk to <5 endpoints — any deviation is suspicious.
+ *
+ * Values empirically calibrated against Ali's LAN in Apr 2026: normal
+ * iPhone browsing sustained 100-200 new domains/h, Macs 50-150/h, IoT 1-5/h.
+ */
+const NEW_DOMAIN_THRESHOLDS: Record<string, number> = {
+  smartphone: 150,
+  tablet: 150,
+  laptop: 150,
+  desktop: 150,
+  workstation: 150,
+};
+const DEFAULT_NEW_DOMAIN_THRESHOLD = 25;
+
+function thresholdForType(hostType: string | null | undefined): number {
+  if (!hostType) return DEFAULT_NEW_DOMAIN_THRESHOLD;
+  return NEW_DOMAIN_THRESHOLDS[hostType] ?? DEFAULT_NEW_DOMAIN_THRESHOLD;
+}
+
+/**
  * Per-device DNS anomaly detector. Four heuristics:
  *
  *   rate_spike      (+40 pts): queries_1h > 3× 24h hourly avg AND > 50 queries/h
@@ -105,7 +128,7 @@ export class AnomalyDetector {
     let totalBlocked24h = 0;
 
     for (const entry of managed) {
-      const a = this.computeForMac(entry.mac, entry.aghName, nowSec);
+      const a = this.computeForMac(entry.mac, entry.aghName, entry.hostType ?? null, nowSec);
       totalQ1h += a.queries_1h;
       totalNx1h += Math.round(a.queries_1h * a.nxdomain_rate);
       totalBlocked24h += a.blocked_hits_24h;
@@ -229,8 +252,9 @@ export class AnomalyDetector {
     return true;
   }
 
-  private computeForMac(mac: string, name: string | null, nowSec: number): DeviceAnomaly {
+  private computeForMac(mac: string, name: string | null, hostType: string | null, nowSec: number): DeviceAnomaly {
     const entry = this.anomalyState.get(mac) ?? { firstSeenDomains: {}, hourlyCounts: {} };
+    const newDomainThreshold = thresholdForType(hostType);
 
     // queries_1h: current hour bucket
     const curBucket = this.anomalyState.hourBucket(nowSec);
@@ -270,7 +294,12 @@ export class AnomalyDetector {
     if (q1h >= 30 && nxdomainRate > 0.3) { signals.push("nxdomain_high"); score += 30; }
     // first_seen_flood is suppressed during the bootstrap window: on fresh
     // state every domain looks "new" because there's no prior history.
-    if (pastBootstrap && newDomains > 20) { signals.push("first_seen_flood"); score += 20; }
+    // Threshold scales with device type — phones legitimately hit 100+ new
+    // domains/h while browsing, so they use a much higher bar than IoT.
+    if (pastBootstrap && newDomains > newDomainThreshold) {
+      signals.push("first_seen_flood");
+      score += 20;
+    }
     // threat_hit only fires on actual threat-intel list matches — not user
     // rules (filterId=0) and not ad/tracker lists. Score scales with volume
     // but caps at +20 so a single malware query still grabs attention.
@@ -286,6 +315,7 @@ export class AnomalyDetector {
     return {
       mac,
       name,
+      host_type: hostType,
       ips,
       score,
       signals,
@@ -293,6 +323,7 @@ export class AnomalyDetector {
       queries_24h_avg_per_hour: Math.round(avg24 * 10) / 10,
       nxdomain_rate: Math.round(nxdomainRate * 100) / 100,
       new_domains_1h: newDomains,
+      new_domains_threshold: newDomainThreshold,
       blocked_hits_24h: blocked24,
       threat_intel_hits_24h: tib24,
       last_seen_ts: nowSec,

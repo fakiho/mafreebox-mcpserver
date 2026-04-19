@@ -258,18 +258,19 @@ export class Reconciler {
 
     for (const [mac, desiredEntry] of desired) {
       const { client } = desiredEntry;
+      const hostType = desiredEntry.rawType ?? null;
       const existing = aghByMac.get(mac);
       const wasManaged = this.state.get(mac) !== undefined;
 
       if (existing) {
         if (this.clientEquals(existing, client)) {
-          this.state.upsert({ mac, aghName: client.name, lastSeen: now });
+          this.state.upsert({ mac, aghName: client.name, lastSeen: now, hostType });
           unchanged++;
           continue;
         }
         const upsertResult = await this.updateWithConflictHandling(existing.name, client, mac);
         if (upsertResult) {
-          this.state.upsert({ mac, aghName: upsertResult.name, lastSeen: now });
+          this.state.upsert({ mac, aghName: upsertResult.name, lastSeen: now, hostType });
           if (wasManaged) {
             this.log(`[reconcile] ~ "${existing.name}" → "${upsertResult.name}" (${mac})`);
             updated++;
@@ -283,7 +284,7 @@ export class Reconciler {
 
       const addResult = await this.addWithConflictHandling(client, mac);
       if (addResult) {
-        this.state.upsert({ mac, aghName: addResult.name, lastSeen: now });
+        this.state.upsert({ mac, aghName: addResult.name, lastSeen: now, hostType });
         const typeHint = this.rawTypeHint(desiredEntry);
         this.log(`[reconcile] + ${addResult.name} (${mac}) tags=${(addResult.tags ?? []).join(",") || "-"}${typeHint}`);
         added++;
@@ -359,11 +360,12 @@ export class Reconciler {
     );
     const isManaged = this.state.get(mac) !== undefined;
 
+    const hostType = host.host_type ?? null;
     const now = Math.floor(Date.now() / 1000);
     if (!existing) {
       const saved = await this.addWithConflictHandling(client, mac);
       if (!saved) return false;
-      this.state.upsert({ mac, aghName: saved.name, lastSeen: now });
+      this.state.upsert({ mac, aghName: saved.name, lastSeen: now, hostType });
       this.state.save();
       this.log(`[live] + ${saved.name} ip=${ip} mac=${mac}`);
       return true;
@@ -373,14 +375,14 @@ export class Reconciler {
       return false;
     }
     if (this.clientEquals(existing, client)) {
-      this.state.upsert({ mac, aghName: client.name, lastSeen: now });
+      this.state.upsert({ mac, aghName: client.name, lastSeen: now, hostType });
       this.state.save();
       return false;
     }
     const stateEntry = this.state.get(mac);
     const lookupName = stateEntry?.aghName ?? existing.name;
     await this.agh.updateClient({ name: lookupName, data: client });
-    this.state.upsert({ mac, aghName: client.name, lastSeen: now });
+    this.state.upsert({ mac, aghName: client.name, lastSeen: now, hostType });
     this.state.save();
     this.log(`[live] ~ ${lookupName} → ${client.name} ip=${ip} mac=${mac}`);
     return true;

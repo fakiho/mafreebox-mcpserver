@@ -105,14 +105,19 @@ export interface SuspectedBypasser {
 export interface AghQueryLogItem {
   time?: string;
   client?: string;
-  question?: { host?: string; type?: string };
+  /** AGH uses `name` in modern versions; older may use `host`. Accept both. */
+  question?: { name?: string; host?: string; type?: string; class?: string };
   answer_dnssec?: unknown;
   status?: string;
   reason?: string;
+  /** AGH's real field is `filterId`; kept `filterListId` as legacy alias. */
+  filterId?: number;
   filterListId?: number;
   rule?: string;
   elapsedMs?: string;
   upstream?: string;
+  cached?: boolean;
+  client_info?: { name?: string; whois?: Record<string, unknown> };
 }
 
 export interface AghQueryLogResponse {

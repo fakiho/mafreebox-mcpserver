@@ -159,15 +159,14 @@ export class AnomalyDetector {
     if (!item.time || !item.client) return null;
     const tsMs = Date.parse(item.time);
     if (!Number.isFinite(tsMs)) return null;
-    const domain = (item.question?.host ?? "").toLowerCase().trim();
+    const domain = (item.question?.name ?? item.question?.host ?? "").toLowerCase().trim();
     if (!domain) return null;
     const status = (item.status ?? "").toLowerCase();
     const reason = (item.reason ?? "").toLowerCase();
     const blocked =
       reason.startsWith("filtered") ||
       reason.startsWith("blocked") ||
-      status.startsWith("filtered") ||
-      (item.filterListId !== undefined && item.filterListId >= 0 && reason !== "notfilteredwhitelist");
+      reason === "rewrite";
     const nxdomain = status === "nxdomain" || status === "nodata";
     return {
       ts: Math.floor(tsMs / 1000),

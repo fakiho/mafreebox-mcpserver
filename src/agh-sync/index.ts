@@ -148,7 +148,7 @@ async function main() {
   const runAnomalyDetection = async () => {
     try {
       const neighSnap = await neighbors.snapshot();
-      anomalyDetector.updateIpMap(neighSnap);
+      await anomalyDetector.updateIpMap(neighSnap);
       const metrics = await anomalyDetector.run();
       health.recordMetrics(metrics);
       const nowMs = Date.now();

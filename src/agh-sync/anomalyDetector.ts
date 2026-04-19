@@ -28,6 +28,7 @@ const SCORE_THRESHOLD = 40;
 export class AnomalyDetector {
   private lastSeenQueryTs = 0;
   private ipToMac = new Map<string, string>();
+  private lastAttributionStats = { seen: 0, attributed: 0 };
 
   constructor(
     private agh: AdGuardHomeClient,
@@ -36,17 +37,37 @@ export class AnomalyDetector {
     private log: (msg: string) => void,
   ) {}
 
-  /** Rebuilds the IP→MAC map from state + current AGH clients. */
-  updateIpMap(neighIps: Map<string, Set<string>>): void {
+  private isMac(s: string): boolean {
+    return /^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/i.test(s);
+  }
+
+  /**
+   * Builds the IP→MAC map from two sources, in order of authority:
+   *   1. AGH client `ids` — populated by our sync with the device's MAC + IPs.
+   *      This is the strongest source because we controlled what went in.
+   *   2. Kernel neighbor cache (ARP/NDP) — catches IPs the device rotates to
+   *      that aren't in AGH's ids yet (e.g., fresh IPv6 privacy address).
+   */
+  async updateIpMap(neighIps: Map<string, Set<string>>): Promise<void> {
     this.ipToMac.clear();
-    for (const [mac, ips] of neighIps) {
-      for (const ip of ips) this.ipToMac.set(ip, mac);
+    try {
+      const resp = await this.agh.listClients();
+      for (const c of resp.clients ?? []) {
+        const macs = c.ids.filter((id) => this.isMac(id)).map((m) => m.toLowerCase());
+        if (macs.length === 0) continue;
+        const mac = macs[0];
+        for (const id of c.ids) {
+          if (this.isMac(id)) continue;
+          this.ipToMac.set(id, mac);
+        }
+      }
+    } catch (e) {
+      this.log(`[anomaly] listClients failed while building IP map: ${String(e)}`);
     }
-    // State-tracked clients: their AGH ids often include IPs too.
-    for (const entry of this.state.all()) {
-      // state.json doesn't store IPs per MAC — we rely on neigh cache alone here.
-      // No-op for now; this block reserved for future IP-tracking in state.
-      void entry;
+    for (const [mac, ips] of neighIps) {
+      for (const ip of ips) {
+        if (!this.ipToMac.has(ip)) this.ipToMac.set(ip, mac);
+      }
     }
   }
 
@@ -96,6 +117,7 @@ export class AnomalyDetector {
       this.lastSeenQueryTs > 0 ? this.lastSeenQueryTs * 1000 : (nowSec - 3600) * 1000;
 
     let newestSeenMs = this.lastSeenQueryTs * 1000;
+    let attributed = 0;
 
     for (let page = 0; page < maxPages; page++) {
       let resp;
@@ -115,8 +137,8 @@ export class AnomalyDetector {
         const tsMs = rec.ts * 1000;
         if (tsMs <= lookbackFloorMs) { reachedFloor = true; continue; }
         if (tsMs > newestSeenMs) newestSeenMs = tsMs;
-        this.recordQuery(rec);
         totalFetched++;
+        if (this.recordQuery(rec)) attributed++;
       }
       if (reachedFloor) break;
       olderThan = items[items.length - 1].time;
@@ -124,7 +146,13 @@ export class AnomalyDetector {
     }
 
     if (newestSeenMs > 0) this.lastSeenQueryTs = Math.floor(newestSeenMs / 1000);
-    if (totalFetched > 0) this.log(`[anomaly] ingested ${totalFetched} query log entries`);
+    this.lastAttributionStats = { seen: totalFetched, attributed };
+    if (totalFetched > 0) {
+      const pct = Math.round((attributed / totalFetched) * 100);
+      this.log(
+        `[anomaly] ingested ${totalFetched} query log entries, attributed ${attributed} to managed MACs (${pct}%), ip-map size=${this.ipToMac.size}`,
+      );
+    }
   }
 
   private toRecord(item: AghQueryLogItem): QueryRecord | null {
@@ -150,9 +178,9 @@ export class AnomalyDetector {
     };
   }
 
-  private recordQuery(rec: QueryRecord): void {
+  private recordQuery(rec: QueryRecord): boolean {
     const mac = this.ipToMac.get(rec.clientIp);
-    if (!mac) return;
+    if (!mac) return false;
     const entry = this.anomalyState.getOrInit(mac);
     const bucket = this.anomalyState.hourBucket(rec.ts);
     entry.hourlyCounts[bucket] = (entry.hourlyCounts[bucket] ?? 0) + 1;
@@ -168,6 +196,7 @@ export class AnomalyDetector {
     if (rec.blocked) {
       entry.hourlyCounts[blockedKey] = (entry.hourlyCounts[blockedKey] ?? 0) + 1;
     }
+    return true;
   }
 
   private computeForMac(mac: string, name: string | null, nowSec: number): DeviceAnomaly {

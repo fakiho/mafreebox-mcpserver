@@ -269,11 +269,10 @@ Service sidecar qui pousse automatiquement le nom et les métadonnées des appar
 **Comment ça marche** :
 - **Voie « live » (3 s)** : surveille `auto_clients` dans AGH, détecte une IP nouvelle, interroge la Freebox, crée le client persistant AGH en < 5 s
 - **Voie « reconcile » (5 min)** : balayage complet des hôtes Freebox, met à jour les renommages, supprime les appareils disparus depuis N jours
-- **Sécurité** : ne touche QUE les clients AGH portant le tag `freebox-sync`. Vos clients créés à la main restent intacts
+- **Sécurité** : un fichier d'état local (`sync_state.json`) mémorise quels MAC ont été créés par le sync. Les clients AGH créés à la main ne sont jamais modifiés ni supprimés — AGH impose une liste fermée de tags, donc un tag-marqueur n'est pas possible
 
 **Bonus inclus d'office** :
-- Mapping Freebox `host_type` → tags AGH conventionnels (`device_phone`, `device_laptop`, `device_tv`, `device_printer`, `device_camera`…) → les **règles AGH par tag natives** s'appliquent directement, sans config manuelle. Tag brut `freebox_type:<host_type>` conservé pour traçabilité
-- Tag `source:vm` pour les MAC correspondant à une VM Freebox
+- Mapping Freebox `host_type` → tags AGH conventionnels (`device_phone`, `device_laptop`, `device_tv`, `device_printer`, `device_camera`…) → les **règles AGH par tag natives** s'appliquent directement. Seule la liste officielle AGH (21 tags) est autorisée côté serveur, donc les types Freebox sans correspondance directe n'ajoutent aucun tag
 - Nom de repli « vendor + 3 derniers octets MAC » quand la Freebox n'a pas de nom (ex. `Apple-AABBCC`)
 
 ### Déploiement Docker
@@ -347,10 +346,10 @@ docker compose logs -f agh-sync
 
 ### Vérification
 
-1. Après démarrage, ouvrir AGH → **Paramètres → Clients** → vos appareils apparaissent avec le tag `freebox-sync` + `type:*`
+1. Après démarrage, ouvrir AGH → **Paramètres → Clients** → vos appareils apparaissent avec le tag AGH conventionnel (`device_phone`, `device_laptop`…) quand le mapping s'applique
 2. Déconnecter puis reconnecter un téléphone au Wi-Fi : dans `docker logs -f agh-sync`, vous verrez `[live] + iPhone Ali ip=… mac=…` en quelques secondes
 3. Renommer un appareil dans Freebox OS : au prochain tick reconcile, le nom est mis à jour dans AGH
-4. Créer un client manuellement dans AGH (sans le tag `freebox-sync`) → il n'est jamais modifié ni supprimé par le sync
+4. Un client créé manuellement dans AGH n'est jamais modifié ni supprimé par le sync (son MAC n'est pas dans `sync_state.json`)
 
 ---
 

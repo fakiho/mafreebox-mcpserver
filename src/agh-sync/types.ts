@@ -70,5 +70,3 @@ export interface SyncStateEntry {
 }
 
 export type SyncState = Record<string, SyncStateEntry>;
-
-export const MANAGED_TAG = "freebox-sync";

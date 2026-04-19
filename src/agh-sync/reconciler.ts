@@ -1,18 +1,18 @@
 import type { FreeboxClient } from "../freeboxClient.js";
 import type { AdGuardHomeClient } from "./aghClient.js";
 import type { StateStore } from "./state.js";
-import {
-  MANAGED_TAG,
-  type AghClient,
-  type FreeboxL3Connectivity,
-  type FreeboxLanHostsResponse,
-  type FreeboxRawHost,
+import type {
+  AghClient,
+  FreeboxL3Connectivity,
+  FreeboxLanHostsResponse,
+  FreeboxRawHost,
 } from "./types.js";
 
-// AGH enforces no server-side allowlist, but its UI and per-tag rules only
-// render nicely for its 21 conventional tags (internal/client/storage.go).
-// Mapping Freebox host_type → AGH tag lights up native per-tag filtering
-// without manual setup. Unknown types fall through to `freebox_type:*` only.
+// AGH DOES enforce a server-side allowlist on tags (empirically: POST
+// /control/clients/add returns HTTP 400 "invalid tag: X" for any tag outside
+// the 21 constants in internal/client/storage.go's allowedTags).
+// So we only emit conventional tags — no custom marker, no freebox_type:*.
+// Ownership is tracked in state.json (MAC → aghName), not via a tag marker.
 const FREEBOX_TYPE_TO_AGH_TAG: Record<string, string> = {
   smartphone: "device_phone",
   phone: "device_phone",
@@ -86,15 +86,13 @@ export class Reconciler {
     return `${vendor}-${suffix}`;
   }
 
-  buildTags(host: FreeboxRawHost, isVm: boolean): string[] {
-    const tags = [MANAGED_TAG];
+  buildTags(host: FreeboxRawHost, _isVm: boolean): string[] {
+    const tags: string[] = [];
     const raw = host.host_type;
     if (raw) {
       const conventional = FREEBOX_TYPE_TO_AGH_TAG[raw];
       if (conventional) tags.push(conventional);
-      tags.push(`freebox_type:${raw}`);
     }
-    if (isVm) tags.push("source:vm");
     return tags;
   }
 
@@ -159,17 +157,21 @@ export class Reconciler {
     return macs;
   }
 
-  async reconcile(): Promise<{ added: number; updated: number; deleted: number; unchanged: number }> {
+  async reconcile(): Promise<{ added: number; updated: number; deleted: number; unchanged: number; skipped: number }> {
     const desired = await this.buildDesiredSet();
     const aghResp = await this.agh.listClients();
-    const managed = (aghResp.clients ?? []).filter((c) =>
-      (c.tags ?? []).includes(MANAGED_TAG),
-    );
+    const stateMacs = new Set(this.state.macs());
+
+    // A client is "ours" iff its MAC appears in our state ledger. Everything
+    // else in AGH is user-owned and must never be touched.
     const managedByMac = new Map<string, AghClient>();
-    for (const c of managed) {
-      const mac = c.ids.find((id) => this.normalizeMac(id) !== null);
-      const n = this.normalizeMac(mac ?? null);
-      if (n) managedByMac.set(n, c);
+    const unmanagedByMac = new Map<string, AghClient>();
+    for (const c of aghResp.clients ?? []) {
+      const macId = c.ids.find((id) => this.normalizeMac(id) !== null);
+      const n = this.normalizeMac(macId ?? null);
+      if (!n) continue;
+      if (stateMacs.has(n)) managedByMac.set(n, c);
+      else unmanagedByMac.set(n, c);
     }
 
     const now = Math.floor(Date.now() / 1000);
@@ -177,15 +179,20 @@ export class Reconciler {
     let updated = 0;
     let deleted = 0;
     let unchanged = 0;
+    let skipped = 0;
 
     for (const [mac, { client }] of desired) {
       const existing = managedByMac.get(mac);
       const stateEntry = this.state.get(mac);
       if (!existing) {
+        if (unmanagedByMac.has(mac)) {
+          skipped++;
+          continue;
+        }
         try {
           await this.agh.addClient(client);
           this.state.upsert({ mac, aghName: client.name, lastSeen: now });
-          this.log(`[reconcile] + ${client.name} (${mac}) tags=${(client.tags ?? []).join(",")}`);
+          this.log(`[reconcile] + ${client.name} (${mac}) tags=${(client.tags ?? []).join(",") || "-"}`);
           added++;
         } catch (e) {
           this.log(`[reconcile] add failed for ${client.name} (${mac}): ${String(e)}`);
@@ -227,7 +234,7 @@ export class Reconciler {
     }
 
     this.state.save();
-    return { added, updated, deleted, unchanged };
+    return { added, updated, deleted, unchanged, skipped };
   }
 
   async enrichByIp(ip: string): Promise<boolean> {
@@ -266,9 +273,9 @@ export class Reconciler {
 
     const aghResp = await this.agh.listClients();
     const existing = (aghResp.clients ?? []).find((c) =>
-      (c.tags ?? []).includes(MANAGED_TAG) &&
       c.ids.some((id) => this.normalizeMac(id) === mac),
     );
+    const isManaged = this.state.get(mac) !== undefined;
 
     const now = Math.floor(Date.now() / 1000);
     if (!existing) {
@@ -277,6 +284,10 @@ export class Reconciler {
       this.state.save();
       this.log(`[live] + ${client.name} ip=${ip} mac=${mac}`);
       return true;
+    }
+    if (!isManaged) {
+      // Pre-existing user-owned client with matching MAC — never touch it.
+      return false;
     }
     if (this.clientEquals(existing, client)) {
       this.state.upsert({ mac, aghName: client.name, lastSeen: now });
